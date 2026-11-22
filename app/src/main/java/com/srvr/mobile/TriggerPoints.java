@@ -8,6 +8,7 @@ import org.json.JSONObject;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Predicate;
 import java.util.function.UnaryOperator;
 
 final class TriggerPoints {
@@ -93,6 +94,20 @@ final class TriggerPoints {
         if (points.removeIf(point -> point.number() == number)) {
             preferences.edit().putString(KEY, encode(points)).apply();
         }
+    }
+
+    boolean clearBindings(SharedPreferences.Editor edit, Predicate<String> shouldClear) {
+        List<Point> points = all();
+        boolean changed = false;
+        for (int i = 0; i < points.size(); i++) {
+            Point point = points.get(i);
+            if (!point.soundId().isEmpty() && shouldClear.test(point.soundId())) {
+                points.set(i, new Point(point.number(), point.x(), point.y(), point.locked(), "", ""));
+                changed = true;
+            }
+        }
+        if (changed) edit.putString(KEY, encode(points));
+        return changed;
     }
 
     static int offset(float fraction, int span, int size) {

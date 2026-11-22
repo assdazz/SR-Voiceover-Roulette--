@@ -111,6 +111,8 @@ final class SoundLibrary {
         } catch (JSONException e) {
             android.util.Log.w("SRVR", "Could not read sound sets", e);
         }
+        SharedPreferences.Editor cleanup = preferences.edit();
+        if (triggerPoints.clearBindings(cleanup, id -> playableById(id) == null)) cleanup.apply();
         migrateSlots();
     }
 
@@ -385,6 +387,7 @@ final class SoundLibrary {
     }
 
     private void clearReferences(SharedPreferences.Editor edit, String id) {
+        triggerPoints.clearBindings(edit, id::equals);
         if (id.equals(preferences.getString(LAST_PLAYED, ""))) edit.remove(LAST_PLAYED).remove(LAST_SET_ENTRY);
         for (int slot = 0; slot < pageCount() * SLOTS_PER_PAGE; slot++) {
             if (slotId(slot).equals(id)) edit.putString(SLOT_PREFIX + slot, "");

@@ -129,6 +129,7 @@ public final class TriggerOverlayService extends Service {
             return;
         }
         var saved = library.triggerPoints.all();
+        saved.removeIf(point -> library.playableById(point.soundId()) == null);
         if (saved.isEmpty()) {
             clearWindows();
             stopSelf();

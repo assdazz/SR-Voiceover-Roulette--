@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="about_title">关于软件</string>
+    <string name="about_version">版本 %1$s</string>
+    <string name="about_version_unavailable">版本未知</string>
+    <string name="about_safety">一、安全声明</string>
+    <string name="about_developer">二、开发者说明</string>
+    <string name="about_expanded">已展开</string>
+    <string name="about_collapsed">已折叠</string>
+    <string name="about_behaviour_title">软件做了什么</string>
+    <string name="about_behaviour">本软件是 Android 音效轮盘。它通过应用内轮盘、悬浮轮盘和固定触发点，在本机播放内置音效、你导入的音频和播放集。导入时使用 Android 文件选择器读取你选中的音频。</string>
+    <string name="about_permissions">悬浮窗权限用于跨应用显示悬浮球、轮盘和触发按钮，落在悬浮窗内的触摸由本应用处理。前台服务用于维持悬浮窗，通知权限用于显示状态及关闭入口。本版本不申请联网或麦克风权限，不向游戏注入代码、模拟操作或写入游戏语音。</string>
+    <string name="about_files_title">软件写了哪些文件</string>
+    <string name="about_preferences">· shared_prefs/soundboard.xml 保存应用设置、轮盘槽位、音效参数、播放集、悬浮窗和固定触发点配置、导入音效索引以及最近播放记录。</string>
+    <string name="about_imports">· files/sounds/ 存放手动导入的音频副本。导入期间写入 import-*.tmp 临时文件，完成后以新生成的文件名保存。移除已导入的音效时会删除应用内的副本。</string>
+    <string name="about_logs">上述文件位于应用私有存储。导入、播放或显示失败时，应用可向 Android 系统日志写入排障信息。</string>
+    <string name="about_notice_title">必要提醒</string>
+    <string name="about_notice_third_party">· 这是第三方工具，和游戏官方没有任何关系，也给不了「官方允许使用」这种资格。</string>
+    <string name="about_notice_account">· 用任何第三方程序介入游戏过程，都可能与游戏用户协议冲突，理论上存在被警告、限权、封号的可能，风险由你判断并承担。</string>
+    <string name="about_notice_fair_play">· 在竞技对局里用音效误导对手是否属于不正当行为，由你和平台判断。</string>
+    <string name="about_original_author">Windows 软件原作者：迟昼（B 站账号：缪缪缪尔赛思）</string>
+    <string name="about_mobile_author">移植手机版本作者：于羽悠布德（B站），使用原作者源代码进行移植，可能会有些许差异。</string>
+    <string name="about_ai_title">该软件为 AI 项目</string>
+    <string name="about_ai_process">这个项目的代码是在 AI 辅助下写成的。需求、方案取舍、逐段审查、实机测试和最终判断由作者负责。大量具体代码由 AI 生成，作者验证通过后才合并进版本。</string>
+    <string name="about_updates_title">关于软件更新</string>
+    <string name="about_updates">软件更新会在统计软件bug或需求后统一更新并修复bug，时间不定，根据软件问题严重性排序更新。</string>
+    <string name="about_feedback_title">反馈</string>
+    <string name="about_feedback">B 站私信或评论区发出你的需求或者出现的bug，比较急可以私信，看到的会快一点。</string>
+</resources>

@@ -1,0 +1,49 @@
+import com.android.build.api.artifact.SingleArtifact
+
+plugins {
+    id 'com.android.application'
+}
+
+def mobileVersionName = providers.gradleProperty('srvrVersionName').get()
+def mobileVersionCode = providers.gradleProperty('srvrVersionCode').get().toInteger()
+def downloadDirectory = rootProject.layout.projectDirectory.dir('DL')
+
+android {
+    namespace 'com.srvr.mobile'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId 'com.srvr.mobile'
+        minSdk 26
+        targetSdk 36
+        versionCode mobileVersionCode
+        versionName mobileVersionName
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    androidResources {
+        noCompress.addAll(['wav', 'mp3'])
+    }
+}
+
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        def variantName = variant.name.capitalize()
+        def apkDirectory = variant.artifacts.get(SingleArtifact.APK.INSTANCE)
+        def outputPrefix = "SRVR-Android-${mobileVersionName}-".toString()
+        def collectApk = tasks.register("collect${variantName}Apk", Copy) {
+            from(apkDirectory)
+            include('*.apk')
+            into(downloadDirectory)
+            rename { fileName -> fileName.replaceFirst('^app-', outputPrefix) }
+        }
+
+        tasks.matching { it.name == "assemble${variantName}" }.configureEach {
+            dependsOn(collectApk)
+        }
+    }
+}

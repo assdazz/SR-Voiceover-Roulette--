@@ -59,7 +59,9 @@ public final class OverlayService extends Service {
         if (key == null) return;
         if (key.equals(SoundLibrary.BANK) || key.equals(SoundLibrary.IMPORTS) || key.equals(SoundLibrary.SETS)
                 || key.startsWith(SoundLibrary.SLOT_PREFIX)) refreshPanel();
-        if (key.equals(FloatingSettings.WHEEL_SIZE) && panel != null) {
+        if ((key.equals(FloatingSettings.WHEEL_SIZE)
+                || key.equals(FloatingSettings.WHEEL_HUB_RATIO)
+                || key.equals(FloatingSettings.WHEEL_OUTER_THICKNESS)) && panel != null) {
             if (sizeAndLocatePanel()) update(panel, panelParams);
             else dismissPanel();
         }
@@ -298,11 +300,14 @@ public final class OverlayService extends Service {
         int anchorY = bubbleParams.y + bubbleParams.height / 2;
         boolean opensRight = anchorX <= area.centerX();
         int sizePercent = library.floating.wheelSize();
+        int hubPercent = library.floating.wheelHubPercent();
+        int outerPercent = library.floating.wheelOuterPercent();
         WheelGeometry.Panel bounds = WheelGeometry.place(area.left, area.top, area.right, area.bottom,
                 anchorX, anchorY, dp(WheelGeometry.PADDING_DP),
-                WheelView.preferredRadius(windowContext, sizePercent), opensRight);
+                WheelView.preferredRadius(windowContext, sizePercent),
+                WheelGeometry.hubRatio(hubPercent), opensRight);
         if (bounds == null) return false;
-        panelWheel.configure(sizePercent, opensRight);
+        panelWheel.configure(sizePercent, hubPercent, outerPercent, opensRight);
         panelParams.width = bounds.width();
         panelParams.height = bounds.height();
         panelParams.x = bounds.left();

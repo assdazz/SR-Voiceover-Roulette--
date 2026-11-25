@@ -33,7 +33,17 @@ final class FloatingSettings {
     static final int MIN_WHEEL_SIZE = 70;
     static final int MAX_WHEEL_SIZE = 140;
     static final int WHEEL_SIZE_STEP = 5;
+    static final int MIN_WHEEL_HUB = 15;
+    static final int MAX_WHEEL_HUB = 55;
+    static final int WHEEL_HUB_STEP = 1;
+    static final int DEFAULT_WHEEL_HUB = 30;
+    static final int MIN_WHEEL_OUTER = 12;
+    static final int MAX_WHEEL_OUTER = 45;
+    static final int WHEEL_OUTER_STEP = 1;
+    static final int DEFAULT_WHEEL_OUTER = 30;
     static final String WHEEL_SIZE = "wheel.size";
+    static final String WHEEL_HUB_RATIO = "wheel.hubRatio";
+    static final String WHEEL_OUTER_THICKNESS = "wheel.outerThickness";
     static final String POSITION_LOCKED = "bubble.locked";
     static final String POSITION_X = "bubble.x";
     private static final String POSITION_Y = "bubble.y";
@@ -69,6 +79,22 @@ final class FloatingSettings {
 
     void saveWheelSize(int percent) {
         preferences.edit().putInt(WHEEL_SIZE, percent).apply();
+    }
+
+    int wheelHubPercent() {
+        return value(WHEEL_HUB_RATIO, DEFAULT_WHEEL_HUB, MIN_WHEEL_HUB, MAX_WHEEL_HUB);
+    }
+
+    void saveWheelHubPercent(int percent) {
+        preferences.edit().putInt(WHEEL_HUB_RATIO, percent).apply();
+    }
+
+    int wheelOuterPercent() {
+        return value(WHEEL_OUTER_THICKNESS, DEFAULT_WHEEL_OUTER, MIN_WHEEL_OUTER, MAX_WHEEL_OUTER);
+    }
+
+    void saveWheelOuterPercent(int percent) {
+        preferences.edit().putInt(WHEEL_OUTER_THICKNESS, percent).apply();
     }
 
     int buttonSize() {

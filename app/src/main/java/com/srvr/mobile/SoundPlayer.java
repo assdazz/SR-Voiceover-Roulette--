@@ -37,7 +37,9 @@ final class SoundPlayer {
         private final SoundLibrary.Sound sound;
         private final String key;
         private final Runnable completion;
+        private Runnable onRelease;
         private LoudnessEnhancer boost;
+        private VirtualMicPcmEngine.ClipHandle micClip;
         private int volume;
         private boolean ready;
         private boolean boostUnavailable;
@@ -111,6 +113,13 @@ final class SoundPlayer {
         playClip(context.getApplicationContext(), sound, entry.settings(), entryKey(entry.id()), null, null);
     }
 
+    static Playback playTest(Context context, SoundLibrary.Sound sound, Runnable started, Runnable released) {
+        Voice voice = playClip(context.getApplicationContext(), sound, new SoundSettings(), "test:virtumic",
+                started, null);
+        if (voice != null) voice.onRelease = released;
+        return voice;
+    }
+
     static Playback playPoint(Context context, TriggerPoints.Point point, Playable item) {
         if (item instanceof SoundSet) return play(context, item);
         Context app = context.getApplicationContext();
@@ -151,13 +160,14 @@ final class SoundPlayer {
         }
         Voice voice = new Voice(player, sound, key, settings.volume, completed);
         voices.put(player, voice);
+        VirtualMicController.get(app).prepareForPlayback();
         try {
             player.setAudioAttributes(new AudioAttributes.Builder()
                     .setUsage(AudioAttributes.USAGE_GAME)
                     .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
                     .build());
             if (sound.bundled()) {
-                try (AssetFileDescriptor asset = app.getAssets().openFd(sound.id())) {
+                try (AssetFileDescriptor asset = app.getAssets().openFd(sound.assetPath())) {
                     player.setDataSource(asset);
                 }
             } else {
@@ -169,6 +179,10 @@ final class SoundPlayer {
                 if (!voices.containsKey(readyPlayer)) return;
                 try {
                     voice.ready = true;
+                    VirtualMicController vmic = VirtualMicController.get(app);
+                    if (vmic.isActive()) {
+                        voice.micClip = vmic.playClip(sound, voice.volume, library.playback.masterVolume(), variation);
+                    }
                     applyVolume(app, voice, library.playback.masterVolume());
                     if (variation.speed() == 1f && variation.semitones() == 0) {
                         readyPlayer.start();
@@ -240,8 +254,13 @@ final class SoundPlayer {
 
     private static void stopVoice(Voice voice) {
         if (voice == null || voices.remove(voice.player) == null) return;
+        if (voice.micClip != null) {
+            voice.micClip.stop();
+            voice.micClip = null;
+        }
         if (voice.boost != null) voice.boost.release();
         voice.player.release();
+        if (voice.onRelease != null) voice.onRelease.run();
     }
 
     static void stop() {
@@ -320,8 +339,29 @@ final class SoundPlayer {
         }
     }
 
+    static void refreshLocalMonitor(Context context) {
+        Context app = context.getApplicationContext();
+        int masterVolume = SoundLibrary.get(app).playback.masterVolume();
+        for (Voice voice : new ArrayList<>(voices.values())) {
+            if (voice.ready) applyVolume(app, voice, masterVolume);
+        }
+    }
+
     private static void applyVolume(Context context, Voice voice, int masterVolume) {
         float gain = (voice.volume / 100f) * (masterVolume / 100f);
+        if (voice.micClip != null) {
+            voice.micClip.setGain(gain);
+        }
+        VirtualMicController vmic = VirtualMicController.get(context);
+        boolean muteLocal = vmic.isActive() && !vmic.localMonitor();
+        if (muteLocal) {
+            voice.player.setVolume(0f, 0f);
+            if (voice.boost != null) {
+                voice.boost.release();
+                voice.boost = null;
+            }
+            return;
+        }
         float base = Math.min(gain, 1f);
         voice.player.setVolume(base, base);
         if (gain <= 1) {

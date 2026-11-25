@@ -13,7 +13,7 @@ android {
     compileSdk 36
 
     defaultConfig {
-        applicationId 'com.srvr.mobile'
+        applicationId 'com.srvr.mobile.virtumic'
         minSdk 26
         targetSdk 36
         versionCode mobileVersionCode
@@ -26,15 +26,21 @@ android {
     }
 
     androidResources {
-        noCompress.addAll(['wav', 'mp3'])
+        noCompress.addAll(['wav', 'mp3', 'm4a', 'aac', 'flac', 'ogg', 'opus'])
     }
+}
+
+dependencies {
+    implementation 'dev.rikka.shizuku:api:13.1.5'
+    implementation 'dev.rikka.shizuku:provider:13.1.5'
+    implementation 'org.lsposed.hiddenapibypass:hiddenapibypass:4.3'
 }
 
 androidComponents {
     onVariants(selector().all()) { variant ->
         def variantName = variant.name.capitalize()
         def apkDirectory = variant.artifacts.get(SingleArtifact.APK.INSTANCE)
-        def outputPrefix = "SRVR-Android-${mobileVersionName}-".toString()
+        def outputPrefix = "SRVR2-Android-${mobileVersionName}-".toString()
         def collectApk = tasks.register("collect${variantName}Apk", Copy) {
             from(apkDirectory)
             include('*.apk')

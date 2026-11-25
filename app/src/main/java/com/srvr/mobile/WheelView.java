@@ -48,6 +48,10 @@ final class WheelView extends View {
     private float radius;
     private boolean opensRight = true;
     private int sizePercent = 100;
+    private int hubPercent = FloatingSettings.DEFAULT_WHEEL_HUB;
+    private int outerPercent = FloatingSettings.DEFAULT_WHEEL_OUTER;
+    private float hubRatio = WheelGeometry.HUB_RATIO;
+    private float innerRatio = WheelGeometry.INNER_RATIO;
     private int page;
     private int pressed = NONE;
     private int flashed = NONE;
@@ -94,9 +98,18 @@ final class WheelView extends View {
     }
 
     void configure(int sizePercent, boolean opensRight) {
-        if (this.sizePercent == sizePercent && this.opensRight == opensRight) return;
+        configure(sizePercent, FloatingSettings.DEFAULT_WHEEL_HUB, FloatingSettings.DEFAULT_WHEEL_OUTER, opensRight);
+    }
+
+    void configure(int sizePercent, int hubPercent, int outerPercent, boolean opensRight) {
+        if (this.sizePercent == sizePercent && this.hubPercent == hubPercent
+                && this.outerPercent == outerPercent && this.opensRight == opensRight) return;
         cancelTouch();
         this.sizePercent = sizePercent;
+        this.hubPercent = hubPercent;
+        this.outerPercent = outerPercent;
+        this.hubRatio = WheelGeometry.hubRatio(hubPercent);
+        this.innerRatio = WheelGeometry.innerRatio(hubPercent, outerPercent);
         this.opensRight = opensRight;
         updateGeometry(getWidth(), getHeight());
         requestLayout();
@@ -106,8 +119,8 @@ final class WheelView extends View {
     @Override protected void onMeasure(int widthSpec, int heightSpec) {
         int padding = Ui.dp(getContext(), WheelGeometry.PADDING_DP);
         float preferred = preferredRadius(getContext(), sizePercent);
-        int width = resolveSize(WheelGeometry.width(preferred, padding), widthSpec);
-        float fitted = WheelGeometry.fitRadius(width, Integer.MAX_VALUE, padding, preferred);
+        int width = resolveSize(WheelGeometry.width(preferred, padding, hubRatio), widthSpec);
+        float fitted = WheelGeometry.fitRadius(width, Integer.MAX_VALUE, padding, preferred, hubRatio);
         setMeasuredDimension(width, resolveSize(WheelGeometry.height(fitted, padding), heightSpec));
     }
 
@@ -117,13 +130,13 @@ final class WheelView extends View {
 
     private void updateGeometry(int width, int height) {
         int padding = Ui.dp(getContext(), WheelGeometry.PADDING_DP);
-        radius = WheelGeometry.fitRadius(width, height, padding, preferredRadius(getContext(), sizePercent));
-        float shift = radius * (1f - WheelGeometry.HUB_RATIO) / 2f;
+        radius = WheelGeometry.fitRadius(width, height, padding, preferredRadius(getContext(), sizePercent), hubRatio);
+        float shift = radius * (1f - hubRatio) / 2f;
         cx = width / 2f + (opensRight ? -shift : shift);
         cy = height / 2f;
         setCircle(outer, radius);
-        setCircle(inner, radius * WheelGeometry.INNER_RATIO);
-        setCircle(hub, radius * WheelGeometry.HUB_RATIO);
+        setCircle(inner, radius * innerRatio);
+        setCircle(hub, radius * hubRatio);
         invalidate();
     }
 
@@ -161,19 +174,21 @@ final class WheelView extends View {
             String label = nextPage ? NEXT_PAGE_LABEL : sound == null ? "＋" : sound.title();
             int labelColor = active || chosen ? Ui.DARK_GREEN
                     : nextPage ? Ui.ACCENT : sound == null ? Ui.SECONDARY : Ui.TEXT;
-            float labelWidth = radius * (nextPage ? 0.34f : outerSlot ? 0.29f : 0.36f);
+            float ringThickness = outerSlot ? (1f - innerRatio) : (innerRatio - hubRatio);
+            float labelWidth = radius * Math.max(0.22f, Math.min(0.46f,
+                    (nextPage ? 0.34f : outerSlot ? 0.29f : 0.36f) * (ringThickness / (outerSlot ? 0.24f : 0.44f) * 0.45f + 0.55f)));
             drawSlotLabel(canvas, label, x, y, labelWidth,
-                    Math.min(radius * 0.108f, textSize(outerSlot ? 11 : 13)), labelColor);
+                    Math.min(radius * Math.min(0.115f, ringThickness * 0.48f), textSize(outerSlot ? 11 : 13)), labelColor);
         }
 
-        float centerRadius = radius * WheelGeometry.HUB_RATIO;
+        float centerRadius = radius * hubRatio;
         boolean centerActive = pressed == CENTER || nodes.focused == CENTER;
         slice.reset();
         slice.addOval(hub, Path.Direction.CW);
         outlinePath(canvas, centerActive ? Ui.ACCENT : 0xff17271f, dp);
         int centerText = centerActive ? Ui.DARK_GREEN : Ui.ACCENT;
         paint.setColor(centerText);
-        float mark = Math.min(radius * 0.046f, 6 * dp);
+        float mark = Math.min(centerRadius * 0.16f, 6 * dp);
         float iconY = cy - centerRadius * 0.23f;
         canvas.drawRoundRect(cx - mark, iconY - mark, cx + mark, iconY + mark, 2 * dp, 2 * dp, paint);
         drawLabel(canvas, pageLabel(), cx, cy + centerRadius * 0.28f, centerRadius * 1.8f,
@@ -196,12 +211,13 @@ final class WheelView extends View {
 
     private float labelX(int slot) {
         double angle = Math.toRadians(WheelGeometry.start(slot) + WheelGeometry.sweep(slot) / 2);
-        return cx + (opensRight ? 1 : -1) * radius * WheelGeometry.labelRadius(slot) * (float) Math.cos(angle);
+        return cx + (opensRight ? 1 : -1) * radius * WheelGeometry.labelRadius(slot, hubRatio, innerRatio)
+                * (float) Math.cos(angle);
     }
 
     private float labelY(int slot) {
         double angle = Math.toRadians(WheelGeometry.start(slot) + WheelGeometry.sweep(slot) / 2);
-        return cy + radius * WheelGeometry.labelRadius(slot) * (float) Math.sin(angle);
+        return cy + radius * WheelGeometry.labelRadius(slot, hubRatio, innerRatio) * (float) Math.sin(angle);
     }
 
     private void drawSlotLabel(Canvas canvas, String label, float x, float y, float width,
@@ -234,7 +250,7 @@ final class WheelView extends View {
     }
 
     private int hit(float x, float y) {
-        return WheelGeometry.hit(opensRight ? x - cx : cx - x, y - cy, radius);
+        return WheelGeometry.hit(opensRight ? x - cx : cx - x, y - cy, radius, hubRatio, innerRatio);
     }
 
     @Override public boolean onTouchEvent(MotionEvent event) {
@@ -441,7 +457,8 @@ final class WheelView extends View {
         private void setBounds(AccessibilityNodeInfo info, int id) {
             int x = Math.round(id == CENTER ? cx : labelX(id));
             int y = Math.round(id == CENTER ? cy : labelY(id));
-            float width = id == CENTER ? WheelGeometry.HUB_RATIO : id < WheelGeometry.INNER_SLOTS ? 0.17f : 0.12f;
+            float width = id == CENTER ? hubRatio
+                    : id < WheelGeometry.INNER_SLOTS ? (innerRatio - hubRatio) * 0.45f : (1f - innerRatio) * 0.5f;
             int r = Math.round(radius * width);
             Rect bounds = new Rect(x - r, y - r, x + r, y + r);
             info.setBoundsInParent(bounds);

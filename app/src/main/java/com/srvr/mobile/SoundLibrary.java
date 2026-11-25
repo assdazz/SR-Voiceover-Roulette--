@@ -11,18 +11,18 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.InputStreamReader;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 
@@ -35,7 +35,13 @@ final class SoundLibrary {
     static final String SLOT_PREFIX = "wheel.slot.";
     private static final String MIGRATED_SLOTS = "wheel.slotsMigrated";
     private static final String EXTRA_PAGE = "wheel.extraPage";
-    private static final String ASSET_PREFIX = "sounds/";
+    private static final String ASSET_DIRECTORY = "sounds";
+    private static final String ASSET_PREFIX = ASSET_DIRECTORY + "/";
+    // Preserve the original default wheel order and IDs already saved by older installs.
+    private static final String[] ORIGINAL_BUNDLED_ORDER = {
+        "78物业.mp3", "冰冰冰.wav", "呦吼吼.wav", "哇哦.wav", "哎呦我去.wav", "嗯？.wav",
+        "嘶吼（魔了）.wav", "巴哈哈哈哈哈.wav", "怒.wav", "爱音唐哭.wav", "男人叹气声.wav", "真的很帅.wav", "饿啊.wav"
+    };
     private static final String SETTINGS_PREFIX = "settings.";
     private static final String LAST_PLAYED = "lastPlayedSound";
     private static final String LAST_SET_ENTRY = "lastPlayedSetEntry";
@@ -50,9 +56,12 @@ final class SoundLibrary {
 
         String format() {
             int dot = filename.lastIndexOf('.');
-            return dot > 0 ? filename.substring(dot + 1).toUpperCase(java.util.Locale.ROOT) : "音频";
+            return dot > 0 ? filename.substring(dot + 1).toUpperCase(Locale.ROOT) : "音频";
         }
 
+        String assetPath() {
+            return ASSET_PREFIX + filename;
+        }
     }
 
     private static SoundLibrary instance;
@@ -81,14 +90,8 @@ final class SoundLibrary {
         playback = new PlaybackSettings(preferences);
         triggerPoints = new TriggerPoints(preferences);
         importsDir = new File(context.getFilesDir(), "sounds");
-        try (BufferedReader catalog = new BufferedReader(new InputStreamReader(
-                context.getAssets().open("sounds.tsv"), StandardCharsets.UTF_8))) {
-            String line;
-            while ((line = catalog.readLine()) != null) {
-                int tab = line.indexOf('\t');
-                if (tab > 0) bundled.add(new Sound(ASSET_PREFIX + line.substring(0, tab),
-                        line.substring(tab + 1), true));
-            }
+        try {
+            bundled.addAll(bundledSounds(context.getAssets().list(ASSET_DIRECTORY)));
         } catch (IOException e) {
             android.util.Log.w("SRVR", "Could not read bundled sounds", e);
         }
@@ -114,6 +117,31 @@ final class SoundLibrary {
         SharedPreferences.Editor cleanup = preferences.edit();
         if (triggerPoints.clearBindings(cleanup, id -> playableById(id) == null)) cleanup.apply();
         migrateSlots();
+    }
+
+    static List<Sound> bundledSounds(String[] filenames) {
+        List<Sound> sounds = new ArrayList<>();
+        if (filenames == null) return sounds;
+        Set<String> available = new TreeSet<>(String.CASE_INSENSITIVE_ORDER.thenComparing(Comparator.naturalOrder()));
+        for (String filename : filenames) {
+            int dot = filename.lastIndexOf('.');
+            if (dot <= 0) continue;
+            switch (filename.substring(dot + 1).toLowerCase(Locale.ROOT)) {
+                case "wav", "mp3", "m4a", "aac", "flac", "ogg", "opus" -> available.add(filename);
+            }
+        }
+        for (int index = 0; index < ORIGINAL_BUNDLED_ORDER.length; index++) {
+            String filename = ORIGINAL_BUNDLED_ORDER[index];
+            if (available.remove(filename)) sounds.add(new Sound(originalBundledId(index), filename, true));
+        }
+        for (String filename : available) sounds.add(new Sound("asset:" + filename, filename, true));
+        return sounds;
+    }
+
+    private static String originalBundledId(int index) {
+        String filename = ORIGINAL_BUNDLED_ORDER[index];
+        return String.format(Locale.ROOT, "%s%02d%s", ASSET_PREFIX, index + 1,
+                filename.substring(filename.lastIndexOf('.')));
     }
 
     List<Sound> sounds() {
@@ -260,7 +288,7 @@ final class SoundLibrary {
     }
 
     private String defaultSlotId(int slot) {
-        return slot < bundled.size() ? bundled.get(slot).id() : "";
+        return slot < ORIGINAL_BUNDLED_ORDER.length ? originalBundledId(slot) : "";
     }
 
     private void migrateSlots() {

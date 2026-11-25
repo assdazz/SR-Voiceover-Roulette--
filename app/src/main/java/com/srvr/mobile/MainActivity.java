@@ -24,11 +24,14 @@ public final class MainActivity extends Activity {
     private LinearLayout body;
     private LinearLayout tabs;
     private WheelView wheel;
+    private ImageButton microphone;
     private Button deleteSlot;
     private LinearLayout soundParameters;
     private int selectedSlot = -1;
     private String selectedSoundId;
     private boolean libraryTab;
+
+    private final VirtualMicController.Listener micStateChanged = this::updateMicrophoneButton;
 
     private final SharedPreferences.OnSharedPreferenceChangeListener settingsChanged = (prefs, key) -> {
         if (key == null) return;
@@ -36,7 +39,10 @@ public final class MainActivity extends Activity {
         if (key.equals(SoundLibrary.BANK) || key.equals(SoundLibrary.IMPORTS)
                 || key.equals(SoundLibrary.SETS)
                 || key.startsWith(SoundLibrary.SLOT_PREFIX)) refreshWheel();
-        if (key.equals(FloatingSettings.WHEEL_SIZE) || key.equals(FloatingSettings.POSITION_X)) configureWheel();
+        if (key.equals(FloatingSettings.WHEEL_SIZE)
+                || key.equals(FloatingSettings.WHEEL_HUB_RATIO)
+                || key.equals(FloatingSettings.WHEEL_OUTER_THICKNESS)
+                || key.equals(FloatingSettings.POSITION_X)) configureWheel();
         if (key.equals(PlaybackSettings.SEQUENCE_MS) && soundParameters != null) {
             int last = soundParameters.getChildCount() - 1;
             if (soundParameters.getChildAt(last) instanceof SoundSettingsPanel panel) panel.refreshSequenceHint();
@@ -55,6 +61,13 @@ public final class MainActivity extends Activity {
         buildScreen();
         renderTab(false);
         library.preferences.registerOnSharedPreferenceChangeListener(settingsChanged);
+        VirtualMicController.get(this).addListener(micStateChanged);
+        updateMicrophoneButton();
+    }
+
+    @Override protected void onResume() {
+        super.onResume();
+        updateMicrophoneButton();
     }
 
     @Override protected void onSaveInstanceState(Bundle state) {
@@ -65,21 +78,34 @@ public final class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        VirtualMicController.get(this).removeListener(micStateChanged);
         library.preferences.unregisterOnSharedPreferenceChangeListener(settingsChanged);
         super.onDestroy();
+    }
+
+    private void updateMicrophoneButton() {
+        if (microphone == null) return;
+        boolean active = VirtualMicController.get(this).isActive();
+        microphone.setColorFilter(active ? Ui.DARK_GREEN : Ui.TEXT);
+        microphone.setBackground(Ui.shape(this, active ? Ui.ACCENT : Ui.CONTROL, 12, 0));
     }
 
     private void buildScreen() {
         LinearLayout page = Ui.screen(this);
         LinearLayout titleRow = Ui.row(this);
         ImageView icon = new ImageView(this);
-        icon.setImageResource(R.drawable.ic_wheel);
+        icon.setImageResource(R.drawable.ic_app_logo);
         titleRow.addView(icon, new LinearLayout.LayoutParams(dp(42), dp(42)));
         TextView title = Ui.text(this, "SR 音效轮盘", 26, Ui.TEXT, true);
         if (Build.VERSION.SDK_INT >= 28) title.setAccessibilityHeading(true);
         LinearLayout.LayoutParams titleLayout = new LinearLayout.LayoutParams(0, Ui.WRAP, 1);
         titleLayout.setMarginStart(dp(12));
         titleRow.addView(title, titleLayout);
+        microphone = Ui.iconButton(this, R.drawable.ic_microphone, getString(R.string.virtumic_title));
+        microphone.setOnClickListener(view -> startActivity(new Intent(this, VirtuMicActivity.class)));
+        LinearLayout.LayoutParams microphoneLayout = new LinearLayout.LayoutParams(dp(48), dp(48));
+        microphoneLayout.setMarginStart(dp(8));
+        titleRow.addView(microphone, microphoneLayout);
         ImageButton settings = Ui.iconButton(this, R.drawable.ic_settings, "设置");
         settings.setOnClickListener(view -> startActivity(new Intent(this, SettingsActivity.class)));
         LinearLayout.LayoutParams settingsLayout = new LinearLayout.LayoutParams(dp(48), dp(48));
@@ -154,6 +180,12 @@ public final class MainActivity extends Activity {
         Ui.slider(board, "轮盘大小", floating.wheelSize(), FloatingSettings.MIN_WHEEL_SIZE,
                 FloatingSettings.MAX_WHEEL_SIZE, FloatingSettings.WHEEL_SIZE_STEP,
                 value -> value + "%", true, floating::saveWheelSize);
+        Ui.slider(board, "中空比例", floating.wheelHubPercent(), FloatingSettings.MIN_WHEEL_HUB,
+                FloatingSettings.MAX_WHEEL_HUB, FloatingSettings.WHEEL_HUB_STEP,
+                value -> value + "%", false, floating::saveWheelHubPercent);
+        Ui.slider(board, "外圈厚度", floating.wheelOuterPercent(), FloatingSettings.MIN_WHEEL_OUTER,
+                FloatingSettings.MAX_WHEEL_OUTER, FloatingSettings.WHEEL_OUTER_STEP,
+                value -> value + "%", false, floating::saveWheelOuterPercent);
         TextView help = Ui.text(this, "选择扇区后，可在下方调整音效参数", 13, Ui.SECONDARY, false);
         help.setGravity(Gravity.CENTER);
         Ui.below(board, help, 4);
@@ -186,7 +218,8 @@ public final class MainActivity extends Activity {
 
     private void configureWheel() {
         if (wheel == null) return;
-        wheel.configure(library.floating.wheelSize(), library.floating.position().x() <= 0.5f);
+        wheel.configure(library.floating.wheelSize(), library.floating.wheelHubPercent(),
+                library.floating.wheelOuterPercent(), library.floating.position().x() <= 0.5f);
     }
 
     private void selectSlot(int index) {

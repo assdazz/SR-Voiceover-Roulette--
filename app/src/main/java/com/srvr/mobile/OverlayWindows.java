@@ -45,6 +45,17 @@ final class OverlayWindows {
         }
     }
 
+    static Rect displayBounds(WindowManager windows) {
+        if (Build.VERSION.SDK_INT >= 30) {
+            Rect bounds = windows.getCurrentWindowMetrics().getBounds();
+            return new Rect(0, 0, bounds.width(), bounds.height());
+        }
+        Display display = windows.getDefaultDisplay();
+        Point size = new Point();
+        display.getRealSize(size);
+        return new Rect(0, 0, size.x, size.y);
+    }
+
     static Rect fullDisplayArea(WindowManager windows) {
         if (Build.VERSION.SDK_INT >= 30) {
             var metrics = windows.getCurrentWindowMetrics();

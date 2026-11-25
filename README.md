@@ -1,18 +1,32 @@
-# SR 音效轮盘 Android 版
+# 「神人音效轮盘」Android 版（Shizuku 虚拟麦克风版）
 
-SR Voiceover Roulette 的 Android 移植版，支持 Android 8.0 及以上版本。可通过应用内轮盘、跨应用悬浮轮盘或实验性的固定触发点播放音效。支持导入本地音频、创建播放集，以及调整音量、音调和播放速度。
+SR Voiceover Roulette 的 Android 原生移植版（当前版本：`A-0.1.26-ShizukuMic`），支持 Android 8.0 及以上系统（Shizuku 虚拟麦克风与穿透热区建议 Android 10+，推荐 Android 13+）。
 
-跨应用使用时，请在系统设置中授予悬浮窗权限。
+支持应用内双环轮盘、跨应用悬浮轮盘、Shizuku 免 Root 虚拟麦克风推流、零拦截穿透热区与游戏截图 1:1 对齐，并可自由导入本地音频、创建播放集及调整音量增益、变调与播放速度。
+
+## 核心功能
+
+- **Shizuku 免 Root 虚拟麦克风**：通过 Shizuku 注册 `REMOTE_SUBMIX` 系统音频通道，以 10 ms 低延迟将音效送入游戏/通话语音；支持「常驻纯音效」「仅放音效时自动接管（1 秒连播保活）」「常驻 + 混入真麦（实验性）」三种模式、本机同时监听与独立音量调节。
+- **一键关闭调试与后台**：在虚拟麦克风页提供「关闭调试与后台」按钮，退出前可一键停止虚拟麦、穿透热区、关闭无线调试并结束 `shizuku_server`，不常驻后台。
+- **悬浮双环轮盘与外观定制**：支持单手滑选松手即播、轻点悬浮球重播与长按呼出；提供「轮盘大小」「中空比例（默认 30%）」「外圈厚度（默认 30%）」实时调节，主界面与悬浮轮盘同步生效。
+- **零拦截穿透热区 + 截图 1:1 对齐**：支持自由拖拽缩放矩形热区、导入游戏截屏作为 1:1 键位对齐底图、开启 Shizuku 底层零拦截穿透（不遮挡不吞触控），并支持隐藏热区边框。
+- **丰富播放与音效参数**：内置 30 段演示音效，支持批量导入音频、播放集（顺序 / 随机 / 随机不重复）、0%–200% 音量增益、固定/随机/连续变调变速与打断控制。
+
+## 安全说明
+
+- 虚拟麦克风基于 Android 系统音频路由机制实现，纯本地处理音频，**不注入游戏进程、不修改游戏内存、不读取游戏数据**。
+- 穿透热区仅通过 Shizuku 监听屏幕触摸坐标并触发本地音效播放，不模拟或篡改点击操作。
+- 不同游戏的反作弊策略可能存在差异，且部分游戏会检测系统调试状态；不使用时建议点击「关闭调试与后台」彻底关闭无线调试与 Shizuku 服务。
 
 ## 构建
 
 用 Android Studio 打开仓库根目录，安装 Android SDK Platform 36 和 Build-Tools 35.0.0，使用 JDK 17 和 Gradle 8.13 构建。命令行可执行：
 
 ```sh
-gradle :app:assembleDebug
+gradle :app:assembleRelease
 ```
 
-构建生成的 APK 会复制到 `DL/`。
+构建生成的 APK 会复制到 `DL/`（已在 `.gitignore` 中忽略）。
 
 ## 许可
 
@@ -20,8 +34,6 @@ gradle :app:assembleDebug
 
 ## 作者
 
-原作者：迟昼（B 站账号：缪缪缪尔赛思）
-
-源码：[ChiZhou6/SR-Voiceover-Roulette](https://github.com/ChiZhou6/SR-Voiceover-Roulette)
-
-移植手机版本作者：于羽悠布德（B站）。
+- Windows 原作者：迟昼（B站：缪缪缪尔赛思）
+- 原项目源码：[ChiZhou6/SR-Voiceover-Roulette](https://github.com/ChiZhou6/SR-Voiceover-Roulette)
+- Android 手机版移植：于羽悠布德（B站）

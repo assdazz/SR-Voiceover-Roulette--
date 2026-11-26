@@ -331,7 +331,8 @@ final class VirtualMicController {
             }
             try {
                 DirectProcessMicClient client = DirectProcessMicClient.launch(app,
-                        reason -> main.post(() -> handleServiceLost(reason)));
+                        reason -> main.post(() -> handleServiceLost(reason)),
+                        pcmEngine::updateRemoteBufferSamples);
                 if (!wantActive) {
                     client.destroy();
                     binding = false;
@@ -550,9 +551,15 @@ final class VirtualMicController {
 
     VirtualMicPcmEngine.ClipHandle playClip(SoundLibrary.Sound sound, int soundVolumePercent,
             int masterVolumePercent, SoundSequence.Variation variation) {
+        return playClip(sound, soundVolumePercent, masterVolumePercent, variation, null);
+    }
+
+    VirtualMicPcmEngine.ClipHandle playClip(SoundLibrary.Sound sound, int soundVolumePercent,
+            int masterVolumePercent, SoundSequence.Variation variation, Runnable onFinished) {
         if (!isActive() || sound == null) return null;
         float gain = (soundVolumePercent / 100f) * (masterVolumePercent / 100f);
-        return pcmEngine.enqueue(app, sound, gain, variation);
+        Runnable uiFinished = onFinished != null ? () -> main.post(onFinished) : null;
+        return pcmEngine.enqueue(app, sound, gain, variation, uiFinished);
     }
 
     void stopAllClips() {

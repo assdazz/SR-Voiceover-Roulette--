@@ -37,6 +37,10 @@ final class DirectProcessMicClient implements IVirtualMicService {
         void onDisconnected(String reason);
     }
 
+    interface BufferLevelListener {
+        void onBufferLevel(int availableSamples);
+    }
+
     private final IRemoteProcess remoteProcess;
     private final ParcelFileDescriptor stdinFd;
     private final ParcelFileDescriptor stdoutFd;
@@ -44,6 +48,7 @@ final class DirectProcessMicClient implements IVirtualMicService {
     private final DataOutputStream out;
     private final Object writeLock = new Object();
     private final DisconnectListener disconnectListener;
+    private final BufferLevelListener bufferLevelListener;
 
     private final CountDownLatch readyLatch = new CountDownLatch(1);
     private final StringBuilder stderrLog = new StringBuilder();
@@ -59,7 +64,8 @@ final class DirectProcessMicClient implements IVirtualMicService {
     private Thread pcmForwardThread;
     private ParcelFileDescriptor activePcmReadFd;
 
-    static DirectProcessMicClient launch(Context app, DisconnectListener listener) throws IOException {
+    static DirectProcessMicClient launch(Context app, DisconnectListener listener,
+            BufferLevelListener bufferListener) throws IOException {
         IBinder binder = Shizuku.getBinder();
         if (binder == null || !binder.pingBinder()) {
             throw new IOException("Shizuku Binder 不可用");
@@ -81,7 +87,7 @@ final class DirectProcessMicClient implements IVirtualMicService {
             throw new IOException("Shizuku.newProcess 返回空进程");
         }
 
-        DirectProcessMicClient client = new DirectProcessMicClient(proc, listener);
+        DirectProcessMicClient client = new DirectProcessMicClient(proc, listener, bufferListener);
         if (!client.awaitReady(READY_TIMEOUT_MS)) {
             String err = client.stderrSummary();
             client.destroy();
@@ -111,9 +117,11 @@ final class DirectProcessMicClient implements IVirtualMicService {
         }
     }
 
-    private DirectProcessMicClient(IRemoteProcess proc, DisconnectListener listener) throws IOException {
+    private DirectProcessMicClient(IRemoteProcess proc, DisconnectListener listener,
+            BufferLevelListener bufferListener) throws IOException {
         this.remoteProcess = proc;
         this.disconnectListener = listener;
+        this.bufferLevelListener = bufferListener;
         try {
             this.stdinFd = proc.getOutputStream();
             this.stdoutFd = proc.getInputStream();
@@ -159,6 +167,13 @@ final class DirectProcessMicClient implements IVirtualMicService {
                     CountDownLatch latch = startLatch;
                     if (ref != null) ref.set(decoded);
                     if (latch != null) latch.countDown();
+                } else if (line.startsWith("BUF:")) {
+                    BufferLevelListener bl = bufferLevelListener;
+                    if (bl != null) {
+                        try {
+                            bl.onBufferLevel(Integer.parseInt(line.substring(4).trim()));
+                        } catch (NumberFormatException ignored) {}
+                    }
                 } else if (line.startsWith("DIAG:")) {
                     String decoded = decodeB64(line.substring(5));
                     cachedDiag = decoded;
@@ -255,7 +270,8 @@ final class DirectProcessMicClient implements IVirtualMicService {
     private void startPcmForwarder(ParcelFileDescriptor readFd) {
         activePcmReadFd = readFd;
         pcmForwardThread = new Thread(() -> {
-            byte[] buf = new byte[ShizukuVirtualMicService.FRAME_SAMPLES * 2]; // 960 bytes = 10ms mono PCM
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO);
+            byte[] buf = new byte[ShizukuVirtualMicService.FRAME_SAMPLES * 2 * 2]; // 20ms max chunk for low latency
             try (FileInputStream in = new FileInputStream(readFd.getFileDescriptor())) {
                 while (!closed && !Thread.currentThread().isInterrupted()) {
                     int n = in.read(buf);

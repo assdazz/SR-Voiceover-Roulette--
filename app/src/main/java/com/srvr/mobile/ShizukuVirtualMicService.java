@@ -44,10 +44,15 @@ public final class ShizukuVirtualMicService extends IVirtualMicService.Stub {
             MediaRecorder.AudioSource.VOICE_PERFORMANCE
     };
 
+    interface BufferLevelListener {
+        void onBufferLevel(int availableSamples);
+    }
+
     private final Context rawContext;
     private final Object lock = new Object();
     private final Object policyLock = new Object();
 
+    private volatile BufferLevelListener bufferLevelListener;
     private volatile boolean running;
     private volatile int appUid;
     private volatile int mode = MODE_ALWAYS_SFX;
@@ -65,6 +70,8 @@ public final class ShizukuVirtualMicService extends IVirtualMicService.Stub {
     private volatile long lastAttachMs;
     private volatile long writtenFrames;
     private volatile long sfxFrames;
+    private volatile long sfxUnderruns;
+    private volatile long sfxOverflows;
 
     // Cached fast-path policy profile after initial probe succeeds
     private volatile int cachedChannelMask = -1;
@@ -85,6 +92,10 @@ public final class ShizukuVirtualMicService extends IVirtualMicService.Stub {
     public ShizukuVirtualMicService() {
         this.rawContext = null;
         unlockHiddenApis();
+    }
+
+    void setBufferLevelListener(BufferLevelListener listener) {
+        this.bufferLevelListener = listener;
     }
 
     private static void unlockHiddenApis() {
@@ -112,6 +123,8 @@ public final class ShizukuVirtualMicService extends IVirtualMicService.Stub {
                 this.attemptLog = "";
                 this.writtenFrames = 0;
                 this.sfxFrames = 0;
+                this.sfxUnderruns = 0;
+                this.sfxOverflows = 0;
                 this.realMicActive = false;
                 this.realMicNote = mode == MODE_MIX_REAL_MIC ? "准备采集真麦" : "未启用（保留原麦通道）";
 
@@ -135,7 +148,7 @@ public final class ShizukuVirtualMicService extends IVirtualMicService.Stub {
                         policyNote = "待命中（平时使用原机真麦，放音效时自动接管）";
                     }
 
-                    this.sfxRing = new PcmRingBuffer(SAMPLE_RATE / 2); // 500 ms ring buffer
+                    this.sfxRing = new PcmRingBuffer(SAMPLE_RATE / 2); // 500 ms compact ring buffer
                     this.running = true;
 
                     if (this.pcmPipe != null) {
@@ -237,7 +250,12 @@ public final class ShizukuVirtualMicService extends IVirtualMicService.Stub {
         sb.append("channels=").append(injectChannels).append(" uidExclude=").append(uidExclusionActive)
                 .append(" attachMs=").append(lastAttachMs).append('\n');
         sb.append("realMicActive=").append(realMicActive).append(" · ").append(realMicNote).append('\n');
-        sb.append("writtenFrames=").append(writtenFrames).append(" sfxFrames=").append(sfxFrames);
+        PcmRingBuffer ring = this.sfxRing;
+        int availMs = ring != null ? (ring.available() * 1000 / SAMPLE_RATE) : 0;
+        sb.append("writtenFrames=").append(writtenFrames).append(" sfxFrames=").append(sfxFrames)
+                .append(" bufMs=").append(availMs)
+                .append(" underruns=").append(sfxUnderruns)
+                .append(" overflows=").append(sfxOverflows);
         if (!lastError.isEmpty()) {
             sb.append("\nerror=").append(lastError);
         }
@@ -628,7 +646,7 @@ public final class ShizukuVirtualMicService extends IVirtualMicService.Stub {
         int minBuf = AudioTrack.getMinBufferSize(
                 trackFormat.getSampleRate(), trackFormat.getChannelMask(), trackFormat.getEncoding());
         int frameBytes = FRAME_SAMPLES * (outMask == AudioFormat.CHANNEL_OUT_STEREO ? 4 : 2);
-        // Keep buffer as tight as Android allows to minimize r_submix startup latency.
+        // Tight low-latency buffer (HAL min or 20ms) for snappy soundboard response.
         int bufSize = Math.max(minBuf, frameBytes * 2);
 
         List<String> errs = new ArrayList<>();
@@ -790,11 +808,12 @@ public final class ShizukuVirtualMicService extends IVirtualMicService.Stub {
     }
 
     private void readPipeLoop() {
+        Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO);
         ParcelFileDescriptor pipe = this.pcmPipe;
         PcmRingBuffer ring = this.sfxRing;
         if (pipe == null || ring == null) return;
         byte[] bytes = new byte[FRAME_SAMPLES * 2];
-        short[] samples = new short[FRAME_SAMPLES];
+        short[] samples = new short[FRAME_SAMPLES + 1];
         try (FileInputStream in = new FileInputStream(pipe.getFileDescriptor())) {
             int carry = -1;
             while (running) {
@@ -816,7 +835,9 @@ public final class ShizukuVirtualMicService extends IVirtualMicService.Stub {
                     carry = bytes[i] & 0xff;
                 }
                 if (count > 0) {
-                    ring.write(samples, count);
+                    if (ring.write(samples, count)) {
+                        sfxOverflows++;
+                    }
                 }
             }
         } catch (IOException e) {
@@ -836,6 +857,10 @@ public final class ShizukuVirtualMicService extends IVirtualMicService.Stub {
         AudioRecord realMic = null;
         long nextMicRetryAt = 0;
         int silentMicStreak = 0;
+        boolean prevHasSfx = false;
+        int emptyStreak = 10;
+        int reportTick = 0;
+        final int fadeSamples = 144; // 3ms anti-click micro-ramp
 
         try {
             while (running) {
@@ -879,6 +904,7 @@ public final class ShizukuVirtualMicService extends IVirtualMicService.Stub {
                             : (mode == MODE_ON_DEMAND ? "按需模式（不放音效时用手机原麦）" : "已关闭（纯音效模式）");
                 }
 
+                // Drain immediately with zero artificial pre-roll hold for minimum latency.
                 int sfxRead = ring.read(sfxBuf, FRAME_SAMPLES);
                 boolean hasSfx = false;
                 for (int i = 0; i < sfxRead; i++) {
@@ -887,8 +913,43 @@ public final class ShizukuVirtualMicService extends IVirtualMicService.Stub {
                         break;
                     }
                 }
+                if (prevHasSfx && sfxRead < FRAME_SAMPLES) {
+                    sfxUnderruns++;
+                    if (sfxRead > 0) {
+                        int ramp = Math.min(sfxRead, fadeSamples);
+                        int rampStart = sfxRead - ramp;
+                        for (int i = 0; i < ramp; i++) {
+                            float scale = 1f - (float) (i + 1) / (float) (ramp + 1);
+                            sfxBuf[rampStart + i] = (short) Math.round(sfxBuf[rampStart + i] * scale);
+                        }
+                    }
+                }
                 for (int i = sfxRead; i < FRAME_SAMPLES; i++) {
                     sfxBuf[i] = 0;
+                }
+                if (hasSfx && emptyStreak >= 2) {
+                    // Smooth 5ms fade-in only after real silence, never chopping transient micro-gaps.
+                    int ramp = Math.min(sfxRead, fadeSamples);
+                    for (int i = 0; i < ramp; i++) {
+                        float scale = (float) (i + 1) / (float) (ramp + 1);
+                        sfxBuf[i] = (short) Math.round(sfxBuf[i] * scale);
+                    }
+                }
+                if (hasSfx) {
+                    emptyStreak = 0;
+                } else if (emptyStreak < 100) {
+                    emptyStreak++;
+                }
+                prevHasSfx = hasSfx && sfxRead == FRAME_SAMPLES;
+
+                if (hasSfx && (++reportTick >= 8)) {
+                    reportTick = 0;
+                    BufferLevelListener bl = this.bufferLevelListener;
+                    if (bl != null) {
+                        bl.onBufferLevel(ring.available());
+                    }
+                } else if (!hasSfx) {
+                    reportTick = 0;
                 }
 
                 int micRead = 0;
@@ -1028,9 +1089,14 @@ public final class ShizukuVirtualMicService extends IVirtualMicService.Stub {
     }
 
     private static short softClip(float sample) {
-        if (sample > 32767f) return 32767;
-        if (sample < -32768f) return -32768;
-        return (short) Math.round(sample);
+        // Unity gain up to 92% full scale, smooth tanh soft clip above (full loudness, zero harsh clipping).
+        final float knee = 30140f;
+        float abs = Math.abs(sample);
+        if (abs <= knee) return (short) Math.round(sample);
+        float headroom = 32767f - knee;
+        float excess = (abs - knee) / headroom;
+        float limited = knee + headroom * (float) Math.tanh(excess);
+        return (short) Math.round(sample < 0f ? -limited : limited);
     }
 
     private static float clampGain(float gain) {
@@ -1083,26 +1149,48 @@ public final class ShizukuVirtualMicService extends IVirtualMicService.Stub {
             this.buffer = new short[capacity];
         }
 
+        synchronized int available() {
+            return available;
+        }
+
+        synchronized void waitForSamples(int target, long timeoutMs) {
+            long deadline = android.os.SystemClock.elapsedRealtime() + timeoutMs;
+            while (available < target) {
+                long rem = deadline - android.os.SystemClock.elapsedRealtime();
+                if (rem <= 0) break;
+                try {
+                    wait(rem);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+        }
+
         synchronized void clear() {
             readPos = 0;
             writePos = 0;
             available = 0;
+            notifyAll();
         }
 
-        synchronized void write(short[] data, int count) {
+        synchronized boolean write(short[] data, int count) {
             int cap = buffer.length;
+            boolean overflowed = false;
             if (count >= cap) {
                 int start = count - cap;
                 System.arraycopy(data, start, buffer, 0, cap);
                 readPos = 0;
                 writePos = 0;
                 available = cap;
-                return;
+                notifyAll();
+                return true;
             }
             int overflow = (available + count) - cap;
             if (overflow > 0) {
                 readPos = (readPos + overflow) % cap;
                 available -= overflow;
+                overflowed = true;
             }
             int first = Math.min(count, cap - writePos);
             System.arraycopy(data, 0, buffer, writePos, first);
@@ -1111,6 +1199,8 @@ public final class ShizukuVirtualMicService extends IVirtualMicService.Stub {
             }
             writePos = (writePos + count) % cap;
             available += count;
+            notifyAll();
+            return overflowed;
         }
 
         synchronized int read(short[] dst, int maxCount) {

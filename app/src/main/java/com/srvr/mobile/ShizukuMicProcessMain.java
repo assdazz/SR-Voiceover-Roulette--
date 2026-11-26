@@ -82,7 +82,9 @@ public final class ShizukuMicProcessMain {
     }
 
     private static void runProtocolLoop() {
+        android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_URGENT_AUDIO);
         ShizukuVirtualMicService service = new ShizukuVirtualMicService();
+        service.setBufferLevelListener(avail -> sendLine("BUF:" + avail));
         ParcelFileDescriptor pcmWriteFd = null;
         FileOutputStream pcmOut = null;
         byte[] pcmBuf = new byte[8192];

@@ -29,8 +29,12 @@ final class VirtualMicPcmEngine {
     static final int SAMPLE_RATE = ShizukuVirtualMicService.SAMPLE_RATE;
     static final int FRAME_SAMPLES = ShizukuVirtualMicService.FRAME_SAMPLES;
     private static final int FRAME_MS = 10;
-    private static final int TAIL_SILENCE_FRAMES = 6;   // 60ms clean silence tail
-    private static final int HOLD_ACTIVE_MS = 1000;     // Keep mic routed 1s for zero-latency consecutive clips
+    private static final long FRAME_NS = 10_000_000L;
+    private static final int BURST_PREFILL_FRAMES = 3; // Fast 30ms onset cushion (<0.5ms burst, low latency)
+    private static final int TARGET_LOW_SAMPLES = SAMPLE_RATE * 30 / 1000;  // 30ms low watermark
+    private static final int TARGET_HIGH_SAMPLES = SAMPLE_RATE * 60 / 1000; // 60ms high watermark
+    private static final int TAIL_SILENCE_FRAMES = 4;  // 40ms clean silence tail
+    private static final int HOLD_ACTIVE_MS = 1000;    // Keep mic routed 1s for zero-latency consecutive clips
     private static final String TAG = "SRVR-MicEngine";
 
     interface ClipHandle {
@@ -55,11 +59,18 @@ final class VirtualMicPcmEngine {
     private volatile Runnable onPipeBroken;
     private volatile ActivityCallback activityCallback;
     private volatile long sentFrames;
+    private volatile int remoteBufferSamples = -1;
+    private volatile long remoteBufferUpdatedMs;
     private volatile String lastClipInfo = "暂无";
     private volatile String lastDecodeError = "";
 
     private ParcelFileDescriptor writePipe;
     private Thread pumpThread;
+
+    void updateRemoteBufferSamples(int availSamples) {
+        this.remoteBufferSamples = availSamples;
+        this.remoteBufferUpdatedMs = SystemClock.elapsedRealtime();
+    }
 
     synchronized void start(ParcelFileDescriptor writePipe, Runnable onPipeBroken, ActivityCallback activityCallback) {
         stop();
@@ -111,6 +122,11 @@ final class VirtualMicPcmEngine {
     }
 
     ClipHandle enqueue(Context app, SoundLibrary.Sound sound, float gain, SoundSequence.Variation variation) {
+        return enqueue(app, sound, gain, variation, null);
+    }
+
+    ClipHandle enqueue(Context app, SoundLibrary.Sound sound, float gain, SoundSequence.Variation variation,
+            Runnable onFinished) {
         if (!running || sound == null) return null;
         float speedFactor = 1f;
         if (variation != null) {
@@ -121,7 +137,7 @@ final class VirtualMicPcmEngine {
         lastClipInfo = sound.filename();
         lastDecodeError = "";
         ClipStream clip = new ClipStream(app.getApplicationContext(), sound, gain, speedFactor,
-                err -> lastDecodeError = err);
+                err -> lastDecodeError = err, onFinished);
         activeClips.add(clip);
         decoders.execute(clip::decodeLoop);
         synchronized (pumpLock) {
@@ -143,15 +159,20 @@ final class VirtualMicPcmEngine {
         if (pipe == null) return;
 
         short[] clipBuf = new short[FRAME_SAMPLES];
+        float[] accum = new float[FRAME_SAMPLES];
         byte[] wireBuf = new byte[FRAME_SAMPLES * 2];
         int tailSilenceFrames = 0;
+        int burstRemaining = 0;
+        boolean wasAudible = false;
         boolean notifiedActive = false;
         long holdUntilMs = 0;
 
         try (FileOutputStream out = new FileOutputStream(pipe.getFileDescriptor())) {
-            long nextTick = SystemClock.elapsedRealtime();
+            long nextTickNs = System.nanoTime();
             while (running) {
                 if (activeClips.isEmpty() && tailSilenceFrames <= 0) {
+                    wasAudible = false;
+                    burstRemaining = 0;
                     if (notifiedActive) {
                         long now = SystemClock.elapsedRealtime();
                         long remainingHold = holdUntilMs - now;
@@ -168,7 +189,7 @@ final class VirtualMicPcmEngine {
                                     }
                                 }
                             }
-                            nextTick = SystemClock.elapsedRealtime();
+                            nextTickNs = System.nanoTime();
                             continue;
                         }
                     }
@@ -181,7 +202,7 @@ final class VirtualMicPcmEngine {
                             }
                         }
                     }
-                    nextTick = SystemClock.elapsedRealtime();
+                    nextTickNs = System.nanoTime();
                     continue;
                 }
 
@@ -190,7 +211,7 @@ final class VirtualMicPcmEngine {
                     notifyActivity(true);
                 }
 
-                float[] accum = new float[FRAME_SAMPLES];
+                java.util.Arrays.fill(accum, 0f);
                 boolean anySamples = false;
 
                 Iterator<ClipStream> it = activeClips.iterator();
@@ -210,22 +231,25 @@ final class VirtualMicPcmEngine {
                     }
                     if (clip.isFinished()) {
                         activeClips.remove(clip);
+                        clip.notifyFinished();
                     }
                 }
 
                 if (anySamples) {
+                    if (!wasAudible) {
+                        wasAudible = true;
+                        burstRemaining = BURST_PREFILL_FRAMES;
+                    }
                     tailSilenceFrames = TAIL_SILENCE_FRAMES;
                     holdUntilMs = SystemClock.elapsedRealtime() + HOLD_ACTIVE_MS;
                 } else if (tailSilenceFrames > 0) {
                     tailSilenceFrames--;
+                    if (tailSilenceFrames == 0) wasAudible = false;
                 }
 
                 if (anySamples || tailSilenceFrames > 0) {
                     for (int i = 0; i < FRAME_SAMPLES; i++) {
-                        float v = accum[i];
-                        if (v > 32767f) v = 32767f;
-                        else if (v < -32768f) v = -32768f;
-                        short s = (short) Math.round(v);
+                        short s = softLimitSample(accum[i]);
                         wireBuf[i * 2] = (byte) (s & 0xff);
                         wireBuf[i * 2 + 1] = (byte) ((s >> 8) & 0xff);
                     }
@@ -233,16 +257,39 @@ final class VirtualMicPcmEngine {
                     if (anySamples) sentFrames++;
                 }
 
-                nextTick += FRAME_MS;
-                long sleep = nextTick - SystemClock.elapsedRealtime();
-                if (sleep > 0) {
+                // Burst first 30ms immediately at onset so UID 2000 AudioTrack starts glitch-free with minimal latency.
+                if (anySamples && burstRemaining > 0) {
+                    burstRemaining--;
+                    nextTickNs = System.nanoTime();
+                    continue;
+                }
+
+                // Closed-loop clock sync: keep UID 2000 buffer tightly pinned in [30ms, 60ms] for low latency & zero drift.
+                long periodNs = FRAME_NS;
+                if (anySamples) {
+                    long ageMs = SystemClock.elapsedRealtime() - remoteBufferUpdatedMs;
+                    int remoteAvail = remoteBufferSamples;
+                    if (remoteAvail >= 0 && ageMs <= 400L) {
+                        if (remoteAvail < SAMPLE_RATE * 15 / 1000) {
+                            periodNs = 7_000_000L;
+                        } else if (remoteAvail < TARGET_LOW_SAMPLES) {
+                            periodNs = 9_400_000L;
+                        } else if (remoteAvail > TARGET_HIGH_SAMPLES) {
+                            periodNs = 10_600_000L;
+                        }
+                    }
+                }
+
+                nextTickNs += periodNs;
+                long sleepNs = nextTickNs - System.nanoTime();
+                if (sleepNs > 500_000L) {
                     try {
-                        Thread.sleep(sleep);
+                        Thread.sleep(sleepNs / 1_000_000L, (int) (sleepNs % 1_000_000L));
                     } catch (InterruptedException e) {
                         if (!running) return;
                     }
-                } else if (sleep < -100) {
-                    nextTick = SystemClock.elapsedRealtime();
+                } else if (sleepNs < -100_000_000L) {
+                    nextTickNs = System.nanoTime();
                 }
             }
         } catch (IOException e) {
@@ -266,33 +313,57 @@ final class VirtualMicPcmEngine {
         }
     }
 
+    private static short softLimitSample(float sample) {
+        final float knee = 30140f; // Transparent up to ~92% full scale, smooth tanh above
+        float abs = Math.abs(sample);
+        if (abs <= knee) return (short) Math.round(sample);
+        float headroom = 32767f - knee;
+        float excess = (abs - knee) / headroom;
+        float limited = knee + headroom * (float) Math.tanh(excess);
+        return (short) Math.round(sample < 0f ? -limited : limited);
+    }
+
     private interface ErrorSink {
         void onError(String message);
     }
 
     private static final class ClipStream implements ClipHandle {
-        private static final int QUEUE_CAPACITY = SAMPLE_RATE / 2; // 500ms decoded buffer
+        private static final int QUEUE_CAPACITY = SAMPLE_RATE; // 1s pre-decoded buffer (~96KB)
 
         private final Context app;
         private final SoundLibrary.Sound sound;
         private final float rateMultiplier;
         private final ErrorSink errorSink;
+        private final Runnable onFinished;
         private final short[] ring = new short[QUEUE_CAPACITY];
 
         private volatile float gain;
         private volatile boolean cancelled;
         private volatile boolean decoderDone;
+        private volatile boolean finishedNotified;
 
         private int readPos;
         private int writePos;
         private int available;
 
-        ClipStream(Context app, SoundLibrary.Sound sound, float gain, float rateMultiplier, ErrorSink errorSink) {
+        ClipStream(Context app, SoundLibrary.Sound sound, float gain, float rateMultiplier,
+                ErrorSink errorSink, Runnable onFinished) {
             this.app = app;
             this.sound = sound;
             this.gain = Math.max(0f, Math.min(2f, gain));
             this.rateMultiplier = rateMultiplier;
             this.errorSink = errorSink;
+            this.onFinished = onFinished;
+        }
+
+        void notifyFinished() {
+            if (finishedNotified || cancelled) return;
+            finishedNotified = true;
+            if (onFinished != null) {
+                try {
+                    onFinished.run();
+                } catch (Throwable ignored) {}
+            }
         }
 
         float gain() {
@@ -426,7 +497,8 @@ final class VirtualMicPcmEngine {
                         long remaining = chunkSize - readLen;
                         if (remaining > 0) skipFully(raw, remaining);
                     } else if ("data".equals(chunkId)) {
-                        dataSize = chunkSize;
+                        dataSize = (chunkSize == 0xFFFFFFFFL || chunkSize == 0xFFFFFFFEL)
+                                ? Long.MAX_VALUE : chunkSize;
                         break;
                     } else {
                         skipFully(raw, chunkSize);
@@ -514,6 +586,8 @@ final class VirtualMicPcmEngine {
                 if (MediaFormat.MIMETYPE_AUDIO_RAW.equals(mime)) {
                     decodeRawPcm(extractor, sampleRate, channels, pcmEncoding, maxInput);
                 } else {
+                    // Ensure large lossless/FLAC/VBR frames never overflow MediaCodec's default input buffer.
+                    format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, Math.max(maxInput, 512 * 1024));
                     codec = MediaCodec.createDecoderByType(mime);
                     codec.configure(format, null, null, 0);
                     codec.start();
@@ -579,14 +653,22 @@ final class VirtualMicPcmEngine {
                         ByteBuffer inBuf = codec.getInputBuffer(inIndex);
                         if (inBuf != null) {
                             inBuf.clear();
-                            int sampleSize = extractor.readSampleData(inBuf, 0);
-                            if (sampleSize < 0) {
-                                codec.queueInputBuffer(inIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
-                                inputEos = true;
-                            } else {
-                                long pts = extractor.getSampleTime();
-                                codec.queueInputBuffer(inIndex, 0, sampleSize, pts, 0);
+                            long expectedSize = extractor.getSampleSize();
+                            if (expectedSize > inBuf.capacity()) {
+                                Log.w(TAG, "Skipping oversized compressed frame (" + expectedSize
+                                        + " > " + inBuf.capacity() + ") for " + sound.filename());
                                 extractor.advance();
+                                codec.queueInputBuffer(inIndex, 0, 0, 0, 0);
+                            } else {
+                                int sampleSize = extractor.readSampleData(inBuf, 0);
+                                if (sampleSize < 0) {
+                                    codec.queueInputBuffer(inIndex, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+                                    inputEos = true;
+                                } else {
+                                    long pts = extractor.getSampleTime();
+                                    codec.queueInputBuffer(inIndex, 0, sampleSize, pts, 0);
+                                    extractor.advance();
+                                }
                             }
                         }
                     }
@@ -604,17 +686,21 @@ final class VirtualMicPcmEngine {
                     pcmEncoding = getPcmEncoding(outFmt);
                     resampler = new Resampler(srcRate, SAMPLE_RATE, rateMultiplier);
                 } else if (outIndex >= 0) {
+                    short[] mono = null;
                     if (info.size > 0) {
                         ByteBuffer outBuf = codec.getOutputBuffer(outIndex);
                         if (outBuf != null) {
                             ByteBuffer slice = outBuf.duplicate().order(ByteOrder.LITTLE_ENDIAN);
                             slice.position(info.offset);
                             slice.limit(info.offset + info.size);
-                            short[] mono = convertToMono16(slice, info.size, channels, pcmEncoding);
-                            emitResampled(resampler, mono);
+                            mono = convertToMono16(slice, info.size, channels, pcmEncoding);
                         }
                     }
+                    // Release MediaCodec buffer BEFORE blocking on ring queue so system C2/OMX slots never stall.
                     codec.releaseOutputBuffer(outIndex, false);
+                    if (mono != null && mono.length > 0) {
+                        emitResampled(resampler, mono);
+                    }
                     if ((info.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
                         outputEos = true;
                     }
@@ -746,16 +832,19 @@ final class VirtualMicPcmEngine {
 
         short[] process(short[] input) {
             if (input.length == 0) return new short[0];
-            if (Math.abs(step - 1.0) < 1e-4 && phase == 0.0) {
+            if (Math.abs(step - 1.0) < 1e-4 && Math.abs(phase) < 1e-4) {
                 prevSample = input[input.length - 1];
                 hasPrev = true;
                 return input;
             }
-            int estimated = (int) Math.ceil((input.length - phase) / step) + 2;
+            // Stop at input.length - 1 so the fractional tail carries into [-1, 0) on the next chunk,
+            // enabling seamless linear interpolation between prevSample and input[0] with zero boundary clicks.
+            double limit = input.length - 1.0;
+            int estimated = (int) Math.ceil((limit - phase) / step) + 2;
             if (estimated <= 0) estimated = 1;
             short[] out = new short[estimated];
             int count = 0;
-            while (phase < input.length) {
+            while (phase < limit) {
                 int idx = (int) Math.floor(phase);
                 double frac = phase - idx;
                 float s0;
@@ -765,7 +854,7 @@ final class VirtualMicPcmEngine {
                     s1 = input[0];
                 } else {
                     s0 = input[idx];
-                    s1 = (idx + 1 < input.length) ? input[idx + 1] : input[idx];
+                    s1 = input[idx + 1];
                 }
                 float val = (float) (s0 + (s1 - s0) * frac);
                 if (val > 32767f) val = 32767f;

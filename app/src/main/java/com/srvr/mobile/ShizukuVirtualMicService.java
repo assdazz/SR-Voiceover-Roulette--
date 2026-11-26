@@ -83,11 +83,7 @@ public final class ShizukuVirtualMicService extends IVirtualMicService.Stub {
     private PcmRingBuffer sfxRing;
 
     public ShizukuVirtualMicService() {
-        this(null);
-    }
-
-    public ShizukuVirtualMicService(Context context) {
-        this.rawContext = context;
+        this.rawContext = null;
         unlockHiddenApis();
     }
 
@@ -416,14 +412,17 @@ public final class ShizukuVirtualMicService extends IVirtualMicService.Stub {
             } catch (Throwable t) {
                 Log.w(TAG, "Fallback from com.android.shell context: " + t.getMessage());
             }
+            if (Build.VERSION.SDK_INT >= 31) {
+                return new ShellIdentityContextApi31(shellBase, Process.SHELL_UID, "com.android.shell");
+            }
             return new ShellIdentityContext(shellBase, Process.SHELL_UID, "com.android.shell");
         }
         return base;
     }
 
-    private static final class ShellIdentityContext extends ContextWrapper {
-        private final int uid;
-        private final String shellPkg;
+    private static class ShellIdentityContext extends ContextWrapper {
+        final int uid;
+        final String shellPkg;
 
         ShellIdentityContext(Context base, int uid, String shellPkg) {
             super(base);
@@ -439,20 +438,23 @@ public final class ShizukuVirtualMicService extends IVirtualMicService.Stub {
             return shellPkg;
         }
 
-        @Override public AttributionSource getAttributionSource() {
-            if (Build.VERSION.SDK_INT >= 31) {
-                AttributionSource.Builder builder = new AttributionSource.Builder(uid)
-                        .setPackageName(shellPkg);
-                if (Build.VERSION.SDK_INT >= 34) {
-                    builder.setPid(Process.myPid());
-                }
-                return builder.build();
-            }
-            return super.getAttributionSource();
-        }
-
         @Override public Context getApplicationContext() {
             return this;
+        }
+    }
+
+    private static final class ShellIdentityContextApi31 extends ShellIdentityContext {
+        ShellIdentityContextApi31(Context base, int uid, String shellPkg) {
+            super(base, uid, shellPkg);
+        }
+
+        @Override public AttributionSource getAttributionSource() {
+            AttributionSource.Builder builder = new AttributionSource.Builder(uid)
+                    .setPackageName(shellPkg);
+            if (Build.VERSION.SDK_INT >= 34) {
+                builder.setPid(Process.myPid());
+            }
+            return builder.build();
         }
     }
 

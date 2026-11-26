@@ -47,8 +47,6 @@ public final class ShizukuTouchMonitorService extends ITouchMonitorService.Stub 
 
     public ShizukuTouchMonitorService() {}
 
-    public ShizukuTouchMonitorService(Context context) {}
-
     private record TouchDevice(String path, String name, int minX, int maxX, int minY, int maxY) {
         boolean valid() {
             return path != null && maxX > minX && maxY > minY;

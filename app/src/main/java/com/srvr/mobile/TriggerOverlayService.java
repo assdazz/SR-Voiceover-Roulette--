@@ -39,6 +39,7 @@ import rikka.shizuku.Shizuku;
 
 public final class TriggerOverlayService extends Service {
     private static final String TAG = "SRVR-TriggerOverlay";
+    private static final long TOUCH_BIND_TIMEOUT_MS = 8000L;
     private static final String STOP = "com.srvr.mobile.STOP_TRIGGER_POINTS";
     private static final String CHANNEL = "sound-trigger-points";
     private static final int NOTIFICATION = 2;
@@ -90,6 +91,7 @@ public final class TriggerOverlayService extends Service {
     private boolean touchBinding;
     private ITouchMonitorService touchService;
     private Shizuku.UserServiceArgs touchServiceArgs;
+    private final Runnable touchBindTimeoutTask = this::handleTouchBindTimeout;
 
     private final SharedPreferences.OnSharedPreferenceChangeListener settingsChanged = (prefs, key) -> {
         if (TriggerPoints.KEY.equals(key)
@@ -124,6 +126,7 @@ public final class TriggerOverlayService extends Service {
 
     private final ServiceConnection touchConnection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
+            main.removeCallbacks(touchBindTimeoutTask);
             touchBinding = false;
             if (active != TriggerOverlayService.this || binder == null || !binder.pingBinder()) {
                 return;
@@ -155,6 +158,7 @@ public final class TriggerOverlayService extends Service {
         }
 
         @Override public void onServiceDisconnected(ComponentName name) {
+            main.removeCallbacks(touchBindTimeoutTask);
             touchBinding = false;
             touchService = null;
             passthroughActive = false;
@@ -254,8 +258,11 @@ public final class TriggerOverlayService extends Service {
             touchBinding = true;
             try {
                 touchServiceArgs = buildTouchServiceArgs();
+                main.removeCallbacks(touchBindTimeoutTask);
+                main.postDelayed(touchBindTimeoutTask, TOUCH_BIND_TIMEOUT_MS);
                 Shizuku.bindUserService(touchServiceArgs, touchConnection);
             } catch (Throwable t) {
+                main.removeCallbacks(touchBindTimeoutTask);
                 touchBinding = false;
                 passthroughActive = false;
                 Log.w(TAG, "Failed to bind ShizukuTouchMonitorService", t);
@@ -265,7 +272,21 @@ public final class TriggerOverlayService extends Service {
         }
     }
 
+    private void handleTouchBindTimeout() {
+        if (!touchBinding) return;
+        Log.w(TAG, "Timed out binding ShizukuTouchMonitorService after " + TOUCH_BIND_TIMEOUT_MS + " ms");
+        unbindTouchMonitor();
+        if (active == this) {
+            Toast.makeText(this,
+                    "Shizuku 穿透监听连接超时，已回退普通模式（建议检查 Shizuku 版本/权限监控设置）",
+                    Toast.LENGTH_LONG).show();
+            updateNotification();
+            refresh();
+        }
+    }
+
     private void unbindTouchMonitor() {
+        main.removeCallbacks(touchBindTimeoutTask);
         passthroughActive = false;
         touchBinding = false;
         resetAllSlots();

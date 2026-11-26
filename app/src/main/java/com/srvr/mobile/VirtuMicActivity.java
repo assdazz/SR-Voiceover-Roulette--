@@ -198,8 +198,11 @@ public final class VirtuMicActivity extends Activity implements VirtualMicContro
         Ui.below(card, micState, 8);
 
         micError = Ui.text(this, "", 13, ERROR_COLOR, false);
+        micError.setPadding(Ui.dp(this, 12), Ui.dp(this, 10), Ui.dp(this, 12), Ui.dp(this, 10));
+        micError.setBackground(Ui.shape(this, 0xff2b1616, 10, ERROR_COLOR));
+        micError.setLineSpacing(Ui.dp(this, 3), 1.0f);
         micError.setVisibility(View.GONE);
-        Ui.below(card, micError, 6);
+        Ui.below(card, micError, 8);
     }
 
     private void buildMixingCard(LinearLayout parent) {
@@ -345,7 +348,7 @@ public final class VirtuMicActivity extends Activity implements VirtualMicContro
             micError.setVisibility(View.GONE);
         } else {
             micError.setVisibility(View.VISIBLE);
-            micError.setText("提示：" + err);
+            micError.setText(err);
         }
     }
 

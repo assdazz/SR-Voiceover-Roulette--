@@ -28,8 +28,10 @@ import java.util.concurrent.ThreadLocalRandom;
 
 final class SoundLibrary {
     static final int SLOTS_PER_PAGE = WheelGeometry.SLOT_COUNT;
+    private static final int LEGACY_SLOTS_PER_PAGE = 7;
     private static final int DEFAULT_PAGES = 2;
     static final String BANK = "bank";
+    static final String GROUPS = "wheel.groups";
     static final String IMPORTS = "imports";
     static final String SETS = "soundSets";
     static final String SLOT_PREFIX = "wheel.slot.";
@@ -64,6 +66,8 @@ final class SoundLibrary {
         }
     }
 
+    record WheelGroup(String id, String name, String[] slots) {}
+
     private static SoundLibrary instance;
 
     final SharedPreferences preferences;
@@ -75,6 +79,7 @@ final class SoundLibrary {
     private final List<Sound> bundled = new ArrayList<>();
     private final List<Sound> imported = new ArrayList<>();
     private final List<SoundSet> sets = new ArrayList<>();
+    private final List<WheelGroup> groups = new ArrayList<>();
 
     static SoundLibrary get(Context context) {
         if (instance == null) {
@@ -117,6 +122,7 @@ final class SoundLibrary {
         SharedPreferences.Editor cleanup = preferences.edit();
         if (triggerPoints.clearBindings(cleanup, id -> playableById(id) == null)) cleanup.apply();
         migrateSlots();
+        loadOrMigrateGroups();
     }
 
     static List<Sound> bundledSounds(String[] filenames) {
@@ -197,7 +203,7 @@ final class SoundLibrary {
     private SoundSet withAddedSounds(SoundSet set, List<Sound> sounds) {
         List<SoundSet.Entry> entries = new ArrayList<>(set.entries());
         for (Sound sound : sounds) {
-            if (soundById(sound.id()) != null) entries.add(SoundSet.Entry.create(sound, settings(sound)));
+            if (soundById(sound.id()) != null) entries.add(SoundSet.Entry.create(sound, new SoundSettings()));
         }
         return set.withEntries(entries);
     }
@@ -214,7 +220,7 @@ final class SoundLibrary {
 
     static String slotLabel(int index) {
         return index < WheelGeometry.INNER_SLOTS ? "内圈 " + (index + 1)
-                : "外圈 " + (index - WheelGeometry.INNER_SLOTS + 1);
+                : "中圈 " + (index - WheelGeometry.INNER_SLOTS + 1);
     }
 
     Playable lastPlayed() {
@@ -269,21 +275,89 @@ final class SoundLibrary {
     }
 
     int pageCount() {
-        return preferences.getBoolean(EXTRA_PAGE, false) ? DEFAULT_PAGES + 1 : DEFAULT_PAGES;
+        return Math.max(1, groups.size());
+    }
+
+    String pageName(int index) {
+        int safe = Math.floorMod(index, pageCount());
+        String custom = customPageName(safe);
+        return custom.isEmpty() ? "第" + (safe + 1) + "组" : custom;
+    }
+
+    String customPageName(int index) {
+        if (groups.isEmpty()) return "";
+        int safe = Math.floorMod(index, groups.size());
+        String raw = groups.get(safe).name();
+        return raw == null ? "" : raw.trim();
+    }
+
+    void setPage(int index) {
+        int target = Math.floorMod(index, pageCount());
+        preferences.edit().putInt(BANK, target).apply();
     }
 
     void nextPage() {
-        preferences.edit().putInt(BANK, (page() + 1) % pageCount()).apply();
+        setPage(page() + 1);
+    }
+
+    void previousPage() {
+        setPage(page() - 1);
+    }
+
+    int addGroup(String customName) {
+        String clean = customName == null ? "" : customName.trim();
+        String[] emptySlots = new String[SLOTS_PER_PAGE];
+        java.util.Arrays.fill(emptySlots, "");
+        groups.add(new WheelGroup("group:" + UUID.randomUUID(), clean, emptySlots));
+        int newIndex = groups.size() - 1;
+        preferences.edit()
+                .putString(GROUPS, encodeGroups())
+                .putInt(BANK, newIndex)
+                .apply();
+        return newIndex;
+    }
+
+    void renameGroup(int index, String customName) {
+        if (groups.isEmpty()) return;
+        int safe = Math.floorMod(index, groups.size());
+        WheelGroup current = groups.get(safe);
+        String clean = customName == null ? "" : customName.trim();
+        if (clean.equals(current.name())) return;
+        groups.set(safe, new WheelGroup(current.id(), clean, current.slots()));
+        preferences.edit().putString(GROUPS, encodeGroups()).apply();
+    }
+
+    boolean removeGroup(int index) {
+        if (groups.size() <= 1) return false;
+        int safe = Math.floorMod(index, groups.size());
+        groups.remove(safe);
+        int currentPage = preferences.getInt(BANK, 0);
+        int nextPage = currentPage >= groups.size() ? groups.size() - 1
+                : (currentPage > safe ? currentPage - 1 : Math.max(0, currentPage));
+        preferences.edit()
+                .putString(GROUPS, encodeGroups())
+                .putInt(BANK, nextPage)
+                .apply();
+        return true;
     }
 
     Playable[] pageSounds() {
+        return pageSounds(page());
+    }
+
+    Playable[] pageSounds(int pageIndex) {
         Playable[] slots = new Playable[SLOTS_PER_PAGE];
-        int start = page() * SLOTS_PER_PAGE;
-        for (int i = 0; i < slots.length; i++) slots[i] = playableById(slotId(start + i));
+        if (groups.isEmpty()) return slots;
+        WheelGroup group = groups.get(Math.floorMod(pageIndex, groups.size()));
+        String[] ids = group.slots();
+        for (int i = 0; i < slots.length; i++) {
+            String id = i < ids.length && ids[i] != null ? ids[i] : "";
+            slots[i] = playableById(id);
+        }
         return slots;
     }
 
-    private String slotId(int slot) {
+    private String legacySlotId(int slot) {
         return preferences.getString(SLOT_PREFIX + slot, defaultSlotId(slot));
     }
 
@@ -306,8 +380,8 @@ final class SoundLibrary {
                 for (int slot = 0; slot < oldSlotsPerPage; slot++) {
                     int oldIndex = page * oldSlotsPerPage + slot;
                     String id = preferences.getString(oldSlotPrefix + oldIndex, defaultSlotId(oldIndex));
-                    if (slot < SLOTS_PER_PAGE) {
-                        edit.putString(SLOT_PREFIX + (page * SLOTS_PER_PAGE + slot), id);
+                    if (slot < LEGACY_SLOTS_PER_PAGE) {
+                        edit.putString(SLOT_PREFIX + (page * LEGACY_SLOTS_PER_PAGE + slot), id);
                     } else if (soundById(id) != null) {
                         overflow.add(id);
                     }
@@ -321,14 +395,65 @@ final class SoundLibrary {
         if (!overflow.isEmpty()) {
             edit.putBoolean(EXTRA_PAGE, true);
             for (int slot = 0; slot < overflow.size(); slot++) {
-                edit.putString(SLOT_PREFIX + (DEFAULT_PAGES * SLOTS_PER_PAGE + slot), overflow.get(slot));
+                edit.putString(SLOT_PREFIX + (DEFAULT_PAGES * LEGACY_SLOTS_PER_PAGE + slot), overflow.get(slot));
             }
         }
         edit.apply();
     }
 
+    private void loadOrMigrateGroups() {
+        groups.clear();
+        String saved = preferences.getString(GROUPS, null);
+        if (saved != null) {
+            try {
+                JSONArray array = new JSONArray(saved);
+                for (int i = 0; i < array.length(); i++) {
+                    JSONObject obj = array.optJSONObject(i);
+                    if (obj == null) continue;
+                    String id = obj.optString("id", "group-" + (i + 1));
+                    String name = obj.optString("name", "");
+                    String[] slots = new String[SLOTS_PER_PAGE];
+                    java.util.Arrays.fill(slots, "");
+                    JSONArray slotArr = obj.optJSONArray("slots");
+                    if (slotArr != null) {
+                        for (int s = 0; s < Math.min(SLOTS_PER_PAGE, slotArr.length()); s++) {
+                            slots[s] = slotArr.optString(s, "");
+                        }
+                    }
+                    groups.add(new WheelGroup(id, name, slots));
+                }
+            } catch (JSONException e) {
+                android.util.Log.w("SRVR", "Could not read wheel groups", e);
+            }
+        }
+        if (!groups.isEmpty()) return;
+
+        // Migrate from legacy 7-slot pages (wheel.slot.0..N) to 8-slot WheelGroups without shifting slots.
+        int legacyPages = preferences.getBoolean(EXTRA_PAGE, false) ? DEFAULT_PAGES + 1 : DEFAULT_PAGES;
+        for (int p = 0; p < legacyPages; p++) {
+            String[] slots = new String[SLOTS_PER_PAGE];
+            java.util.Arrays.fill(slots, "");
+            for (int s = 0; s < LEGACY_SLOTS_PER_PAGE; s++) {
+                slots[s] = legacySlotId(p * LEGACY_SLOTS_PER_PAGE + s);
+            }
+            groups.add(new WheelGroup("group-" + (p + 1), "", slots));
+        }
+        preferences.edit().putString(GROUPS, encodeGroups()).apply();
+    }
+
+    void assign(int pageIndex, int slotInPage, Playable sound) {
+        if (groups.isEmpty() || slotInPage < 0 || slotInPage >= SLOTS_PER_PAGE) return;
+        int safe = Math.floorMod(pageIndex, groups.size());
+        WheelGroup current = groups.get(safe);
+        String[] nextSlots = current.slots().clone();
+        nextSlots[slotInPage] = sound == null ? "" : sound.id();
+        groups.set(safe, new WheelGroup(current.id(), current.name(), nextSlots));
+        preferences.edit().putString(GROUPS, encodeGroups()).apply();
+    }
+
     void assign(int slot, Playable sound) {
-        preferences.edit().putString(SLOT_PREFIX + slot, sound == null ? "" : sound.id()).apply();
+        if (slot < 0) return;
+        assign(slot / SLOTS_PER_PAGE, slot % SLOTS_PER_PAGE, sound);
     }
 
     SoundSettings settings(Sound sound) {
@@ -417,9 +542,41 @@ final class SoundLibrary {
     private void clearReferences(SharedPreferences.Editor edit, String id) {
         triggerPoints.clearBindings(edit, id::equals);
         if (id.equals(preferences.getString(LAST_PLAYED, ""))) edit.remove(LAST_PLAYED).remove(LAST_SET_ENTRY);
-        for (int slot = 0; slot < pageCount() * SLOTS_PER_PAGE; slot++) {
-            if (slotId(slot).equals(id)) edit.putString(SLOT_PREFIX + slot, "");
+        boolean changed = false;
+        for (int g = 0; g < groups.size(); g++) {
+            WheelGroup group = groups.get(g);
+            String[] slots = group.slots();
+            String[] updated = null;
+            for (int s = 0; s < slots.length; s++) {
+                if (id.equals(slots[s])) {
+                    if (updated == null) updated = slots.clone();
+                    updated[s] = "";
+                }
+            }
+            if (updated != null) {
+                groups.set(g, new WheelGroup(group.id(), group.name(), updated));
+                changed = true;
+            }
         }
+        if (changed) edit.putString(GROUPS, encodeGroups());
+    }
+
+    private String encodeGroups() {
+        JSONArray data = new JSONArray();
+        try {
+            for (WheelGroup group : groups) {
+                JSONObject obj = new JSONObject();
+                obj.put("id", group.id());
+                obj.put("name", group.name());
+                JSONArray slotArr = new JSONArray();
+                for (String s : group.slots()) slotArr.put(s == null ? "" : s);
+                obj.put("slots", slotArr);
+                data.put(obj);
+            }
+        } catch (JSONException e) {
+            throw new IllegalStateException(e);
+        }
+        return data.toString();
     }
 
     private String encodeSets() {

@@ -57,11 +57,12 @@ public final class OverlayService extends Service {
 
     private final SharedPreferences.OnSharedPreferenceChangeListener settingsChanged = (prefs, key) -> {
         if (key == null) return;
-        if (key.equals(SoundLibrary.BANK) || key.equals(SoundLibrary.IMPORTS) || key.equals(SoundLibrary.SETS)
+        if (key.equals(SoundLibrary.BANK) || key.equals(SoundLibrary.GROUPS)
+                || key.equals(SoundLibrary.IMPORTS) || key.equals(SoundLibrary.SETS)
                 || key.startsWith(SoundLibrary.SLOT_PREFIX)) refreshPanel();
         if ((key.equals(FloatingSettings.WHEEL_SIZE)
                 || key.equals(FloatingSettings.WHEEL_HUB_RATIO)
-                || key.equals(FloatingSettings.WHEEL_OUTER_THICKNESS)) && panel != null) {
+                || key.equals(FloatingSettings.WHEEL_CONTROL_THICKNESS)) && panel != null) {
             if (sizeAndLocatePanel()) update(panel, panelParams);
             else dismissPanel();
         }
@@ -291,7 +292,8 @@ public final class OverlayService extends Service {
 
     private void refreshPanel() {
         if (panelWheel == null) return;
-        panelWheel.setPage(library.page(), library.pageSounds());
+        int page = library.page();
+        panelWheel.setPage(page, library.pageName(page), library.pageSounds());
     }
 
     private boolean sizeAndLocatePanel() {
@@ -301,13 +303,13 @@ public final class OverlayService extends Service {
         boolean opensRight = anchorX <= area.centerX();
         int sizePercent = library.floating.wheelSize();
         int hubPercent = library.floating.wheelHubPercent();
-        int outerPercent = library.floating.wheelOuterPercent();
+        int controlPercent = library.floating.wheelControlPercent();
         WheelGeometry.Panel bounds = WheelGeometry.place(area.left, area.top, area.right, area.bottom,
                 anchorX, anchorY, dp(WheelGeometry.PADDING_DP),
                 WheelView.preferredRadius(windowContext, sizePercent),
                 WheelGeometry.hubRatio(hubPercent), opensRight);
         if (bounds == null) return false;
-        panelWheel.configure(sizePercent, hubPercent, outerPercent, opensRight);
+        panelWheel.configure(sizePercent, hubPercent, controlPercent, opensRight);
         panelParams.width = bounds.width();
         panelParams.height = bounds.height();
         panelParams.x = bounds.left();

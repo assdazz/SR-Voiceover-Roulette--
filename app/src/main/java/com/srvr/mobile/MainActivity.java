@@ -5,16 +5,22 @@ import android.app.AlertDialog;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.content.res.ColorStateList;
+import android.graphics.drawable.RippleDrawable;
 import android.os.Build;
 import android.os.Bundle;
+import android.text.InputFilter;
 import android.text.TextUtils;
 import android.view.Gravity;
 import android.widget.Button;
+import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.ImageButton;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import java.util.List;
 
@@ -24,9 +30,14 @@ public final class MainActivity extends Activity {
     private LinearLayout body;
     private LinearLayout tabs;
     private WheelView wheel;
+    private Button prevGroupButton;
+    private Button nextGroupButton;
+    private TextView groupTitleText;
+    private TextView groupIndexText;
     private ImageButton microphone;
     private Button deleteSlot;
     private LinearLayout soundParameters;
+    private int selectedPage = -1;
     private int selectedSlot = -1;
     private String selectedSoundId;
     private boolean libraryTab;
@@ -36,12 +47,13 @@ public final class MainActivity extends Activity {
     private final SharedPreferences.OnSharedPreferenceChangeListener settingsChanged = (prefs, key) -> {
         if (key == null) return;
         if ((key.equals(SoundLibrary.IMPORTS) || key.equals(SoundLibrary.SETS)) && libraryTab) renderTab(false);
-        if (key.equals(SoundLibrary.BANK) || key.equals(SoundLibrary.IMPORTS)
+        if (key.equals(SoundLibrary.BANK) || key.equals(SoundLibrary.GROUPS)
+                || key.equals(SoundLibrary.IMPORTS)
                 || key.equals(SoundLibrary.SETS)
                 || key.startsWith(SoundLibrary.SLOT_PREFIX)) refreshWheel();
         if (key.equals(FloatingSettings.WHEEL_SIZE)
                 || key.equals(FloatingSettings.WHEEL_HUB_RATIO)
-                || key.equals(FloatingSettings.WHEEL_OUTER_THICKNESS)
+                || key.equals(FloatingSettings.WHEEL_CONTROL_THICKNESS)
                 || key.equals(FloatingSettings.POSITION_X)) configureWheel();
         if (key.equals(PlaybackSettings.SEQUENCE_MS) && soundParameters != null) {
             int last = soundParameters.getChildCount() - 1;
@@ -53,6 +65,7 @@ public final class MainActivity extends Activity {
         super.onCreate(state);
         if (state != null) {
             libraryTab = state.getBoolean("libraryTab");
+            selectedPage = state.getInt("selectedPage", -1);
             selectedSlot = state.getInt("selectedSlot", -1);
             selectedSoundId = state.getString("selectedSoundId");
         }
@@ -72,6 +85,7 @@ public final class MainActivity extends Activity {
 
     @Override protected void onSaveInstanceState(Bundle state) {
         state.putBoolean("libraryTab", libraryTab);
+        state.putInt("selectedPage", selectedPage);
         state.putInt("selectedSlot", selectedSlot);
         state.putString("selectedSoundId", selectedSoundId);
         super.onSaveInstanceState(state);
@@ -157,6 +171,10 @@ public final class MainActivity extends Activity {
                 .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)));
         addTab(triggers, 1.5f, 8);
         wheel = null;
+        prevGroupButton = null;
+        nextGroupButton = null;
+        groupTitleText = null;
+        groupIndexText = null;
         deleteSlot = null;
         soundParameters = null;
         if (libraryTab) showLibrary();
@@ -172,10 +190,62 @@ public final class MainActivity extends Activity {
 
     private void showWheel() {
         LinearLayout board = Ui.card(this);
+
+        LinearLayout groupBar = Ui.row(this);
+        groupBar.setBaselineAligned(false);
+        int navSize = dp(42);
+        prevGroupButton = compactNavButton("‹", "上一组", navSize);
+        prevGroupButton.setOnClickListener(view -> library.previousPage());
+        groupBar.addView(prevGroupButton, new LinearLayout.LayoutParams(navSize, navSize));
+
+        LinearLayout groupPill = Ui.row(this);
+        groupPill.setPadding(dp(10), dp(4), dp(10), dp(4));
+        groupPill.setBackground(new RippleDrawable(ColorStateList.valueOf(0x308de4a8),
+                Ui.shape(this, Ui.BG, 12, Ui.LINE), null));
+        groupPill.setClickable(true);
+        groupPill.setFocusable(true);
+        groupPill.setContentDescription("点击自定义当前轮盘组名称");
+        groupPill.setOnClickListener(view -> showRenameGroupDialog());
+
+        groupTitleText = Ui.text(this, "", 15, Ui.TEXT, true);
+        groupTitleText.setMaxLines(1);
+        groupTitleText.setEllipsize(TextUtils.TruncateAt.END);
+        groupTitleText.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
+        groupPill.addView(groupTitleText, new LinearLayout.LayoutParams(0, Ui.WRAP, 1));
+
+        groupIndexText = Ui.text(this, "", 12, Ui.ACCENT, true);
+        groupIndexText.setMaxLines(1);
+        LinearLayout.LayoutParams indexLp = new LinearLayout.LayoutParams(Ui.WRAP, Ui.WRAP);
+        indexLp.setMarginStart(dp(6));
+        groupPill.addView(groupIndexText, indexLp);
+
+        LinearLayout.LayoutParams pillLp = new LinearLayout.LayoutParams(0, navSize, 1);
+        pillLp.setMarginStart(dp(6));
+        pillLp.setMarginEnd(dp(6));
+        groupBar.addView(groupPill, pillLp);
+
+        nextGroupButton = compactNavButton("›", "下一组", navSize);
+        nextGroupButton.setOnClickListener(view -> library.nextPage());
+        LinearLayout.LayoutParams nextLp = new LinearLayout.LayoutParams(navSize, navSize);
+        nextLp.setMarginEnd(dp(6));
+        groupBar.addView(nextGroupButton, nextLp);
+
+        Button addGroup = Ui.button(this, "＋新组", true);
+        addGroup.setTextSize(13);
+        addGroup.setMinWidth(dp(56));
+        addGroup.setMinimumWidth(dp(56));
+        addGroup.setMinHeight(navSize);
+        addGroup.setMinimumHeight(navSize);
+        addGroup.setPadding(dp(10), 0, dp(10), 0);
+        addGroup.setContentDescription("新增新的轮盘组");
+        addGroup.setOnClickListener(view -> showAddGroupDialog());
+        groupBar.addView(addGroup, new LinearLayout.LayoutParams(Ui.WRAP, navSize));
+        Ui.below(board, groupBar, 0);
+
         wheel = new WheelView(this, this::selectSlot,
-                slot -> assignSlot(library.page() * SoundLibrary.SLOTS_PER_PAGE + slot), () -> {});
+                slot -> assignSlot(library.page(), slot), () -> {});
         configureWheel();
-        Ui.below(board, wheel, 0);
+        Ui.below(board, wheel, 8);
         FloatingSettings floating = library.floating;
         Ui.slider(board, "轮盘大小", floating.wheelSize(), FloatingSettings.MIN_WHEEL_SIZE,
                 FloatingSettings.MAX_WHEEL_SIZE, FloatingSettings.WHEEL_SIZE_STEP,
@@ -183,10 +253,10 @@ public final class MainActivity extends Activity {
         Ui.slider(board, "中空比例", floating.wheelHubPercent(), FloatingSettings.MIN_WHEEL_HUB,
                 FloatingSettings.MAX_WHEEL_HUB, FloatingSettings.WHEEL_HUB_STEP,
                 value -> value + "%", false, floating::saveWheelHubPercent);
-        Ui.slider(board, "外圈厚度", floating.wheelOuterPercent(), FloatingSettings.MIN_WHEEL_OUTER,
-                FloatingSettings.MAX_WHEEL_OUTER, FloatingSettings.WHEEL_OUTER_STEP,
-                value -> value + "%", false, floating::saveWheelOuterPercent);
-        TextView help = Ui.text(this, "选择扇区后，可在下方调整音效参数", 13, Ui.SECONDARY, false);
+        Ui.slider(board, "第三圈厚度", floating.wheelControlPercent(), FloatingSettings.MIN_WHEEL_CONTROL,
+                FloatingSettings.MAX_WHEEL_CONTROL, FloatingSettings.WHEEL_CONTROL_STEP,
+                value -> value + "%", false, floating::saveWheelControlPercent);
+        TextView help = Ui.text(this, "点击上方组名可改名或删组 · 选中扇区后可在下方调参", 13, Ui.SECONDARY, false);
         help.setGravity(Gravity.CENTER);
         Ui.below(board, help, 4);
 
@@ -206,11 +276,38 @@ public final class MainActivity extends Activity {
         refreshWheel();
     }
 
+    private Button compactNavButton(String label, String description, int size) {
+        Button button = Ui.button(this, label, false);
+        button.setTextSize(22);
+        button.setMinWidth(size);
+        button.setMinimumWidth(size);
+        button.setMinHeight(size);
+        button.setMinimumHeight(size);
+        button.setPadding(0, 0, 0, 0);
+        button.setContentDescription(description);
+        return button;
+    }
+
     private void refreshWheel() {
         if (wheel == null) return;
-        Playable[] sounds = library.pageSounds();
-        wheel.setPage(library.page(), sounds);
-        int slot = selectedSlot - library.page() * SoundLibrary.SLOTS_PER_PAGE;
+        int page = library.page();
+        int total = library.pageCount();
+        String name = library.pageName(page);
+        if (groupTitleText != null) groupTitleText.setText(name);
+        if (groupIndexText != null) groupIndexText.setText((page + 1) + "/" + total + " ✎");
+        boolean canSwitch = total > 1;
+        if (prevGroupButton != null) {
+            prevGroupButton.setEnabled(canSwitch);
+            prevGroupButton.setAlpha(canSwitch ? 1f : 0.42f);
+        }
+        if (nextGroupButton != null) {
+            nextGroupButton.setEnabled(canSwitch);
+            nextGroupButton.setAlpha(canSwitch ? 1f : 0.42f);
+        }
+
+        Playable[] sounds = library.pageSounds(page);
+        wheel.setPage(page, name, sounds);
+        int slot = selectedPage == page ? selectedSlot : -1;
         Playable sound = slot >= 0 && slot < sounds.length ? sounds[slot] : null;
         if (sound != null && !sound.id().equals(selectedSoundId)) sound = null;
         updateSelection(slot, sound);
@@ -219,7 +316,7 @@ public final class MainActivity extends Activity {
     private void configureWheel() {
         if (wheel == null) return;
         wheel.configure(library.floating.wheelSize(), library.floating.wheelHubPercent(),
-                library.floating.wheelOuterPercent(), library.floating.position().x() <= 0.5f);
+                library.floating.wheelControlPercent(), library.floating.position().x() <= 0.5f);
     }
 
     private void selectSlot(int index) {
@@ -227,7 +324,8 @@ public final class MainActivity extends Activity {
     }
 
     private void updateSelection(int index, Playable sound) {
-        selectedSlot = sound == null ? -1 : library.page() * SoundLibrary.SLOTS_PER_PAGE + index;
+        selectedPage = sound == null ? -1 : library.page();
+        selectedSlot = sound == null ? -1 : index;
         wheel.setSelectedSlot(sound == null ? -1 : index);
         deleteSlot.setEnabled(sound != null);
         deleteSlot.setAlpha(sound == null ? 0.46f : 1f);
@@ -235,10 +333,75 @@ public final class MainActivity extends Activity {
     }
 
     private void deleteSelectedSlot() {
-        int index = selectedSlot - library.page() * SoundLibrary.SLOTS_PER_PAGE;
-        Playable[] sounds = library.pageSounds();
-        if (index >= 0 && index < sounds.length && sounds[index] != null
-                && sounds[index].id().equals(selectedSoundId)) library.assign(selectedSlot, null);
+        int page = library.page();
+        if (selectedPage != page) return;
+        Playable[] sounds = library.pageSounds(page);
+        if (selectedSlot >= 0 && selectedSlot < sounds.length && sounds[selectedSlot] != null
+                && sounds[selectedSlot].id().equals(selectedSoundId)) {
+            library.assign(page, selectedSlot, null);
+        }
+    }
+
+    private EditText dialogInput(String initial, String hint) {
+        EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setHint(hint);
+        input.setText(initial);
+        input.setSelection(input.getText().length());
+        input.setFilters(new InputFilter[] {new InputFilter.LengthFilter(20)});
+        return input;
+    }
+
+    private FrameLayout wrapDialogInput(EditText input) {
+        FrameLayout box = new FrameLayout(this);
+        box.setPadding(dp(20), dp(10), dp(20), dp(4));
+        box.addView(input, new FrameLayout.LayoutParams(Ui.MATCH, Ui.WRAP));
+        return box;
+    }
+
+    private void showAddGroupDialog() {
+        int nextNum = library.pageCount() + 1;
+        EditText input = dialogInput("", "自定义组名（留空默认「第" + nextNum + "组」）");
+        new AlertDialog.Builder(this)
+                .setTitle("新增轮盘组")
+                .setView(wrapDialogInput(input))
+                .setPositiveButton("创建", (dialog, which) -> {
+                    int created = library.addGroup(input.getText().toString());
+                    Toast.makeText(this, "已新增并切换到「" + library.pageName(created) + "」",
+                            Toast.LENGTH_SHORT).show();
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void showRenameGroupDialog() {
+        int page = library.page();
+        int total = library.pageCount();
+        EditText input = dialogInput(library.customPageName(page),
+                "默认：第" + (page + 1) + "组（留空恢复默认）");
+        AlertDialog.Builder builder = new AlertDialog.Builder(this)
+                .setTitle("轮盘组名称（第 " + (page + 1) + "/" + total + " 组）")
+                .setView(wrapDialogInput(input))
+                .setPositiveButton("保存", (dialog, which) -> library.renameGroup(page, input.getText().toString()))
+                .setNegativeButton("取消", null);
+        if (total > 1) {
+            builder.setNeutralButton("删除此组", (dialog, which) -> confirmRemoveGroup(page));
+        }
+        builder.show();
+    }
+
+    private void confirmRemoveGroup(int page) {
+        String name = library.pageName(page);
+        new AlertDialog.Builder(this)
+                .setTitle("删除「" + name + "」？")
+                .setMessage("该组内的槽位配置会一并移除，不会删除音效库中的音频文件。")
+                .setPositiveButton("删除", (dialog, which) -> {
+                    if (library.removeGroup(page)) {
+                        Toast.makeText(this, "已删除「" + name + "」", Toast.LENGTH_SHORT).show();
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .show();
     }
 
     private void showSoundParameters(Playable sound) {
@@ -256,18 +419,18 @@ public final class MainActivity extends Activity {
     }
 
     private void showSlotList() {
-        Playable[] sounds = library.pageSounds();
-        int start = library.page() * SoundLibrary.SLOTS_PER_PAGE;
+        int page = library.page();
+        Playable[] sounds = library.pageSounds(page);
         String[] choices = new String[sounds.length];
         for (int i = 0; i < choices.length; i++) {
             choices[i] = SoundLibrary.slotLabel(i) + "　" + (sounds[i] == null ? "空槽位" : sounds[i].title());
         }
-        new AlertDialog.Builder(this).setTitle("管理当前组槽位")
-                .setItems(choices, (dialog, which) -> assignSlot(start + which))
+        new AlertDialog.Builder(this).setTitle("管理「" + library.pageName(page) + "」槽位")
+                .setItems(choices, (dialog, which) -> assignSlot(page, which))
                 .setNegativeButton("关闭", null).show();
     }
 
-    private void assignSlot(int slot) {
+    private void assignSlot(int page, int slot) {
         List<Playable> sounds = library.playables();
         String[] choices = new String[sounds.size() + 1];
         choices[0] = "清空槽位";
@@ -275,8 +438,8 @@ public final class MainActivity extends Activity {
             Playable item = sounds.get(i);
             choices[i + 1] = item instanceof SoundLibrary.Sound clip ? clip.filename() : item.title() + " · 播放集";
         }
-        new AlertDialog.Builder(this).setTitle("为" + SoundLibrary.slotLabel(slot % SoundLibrary.SLOTS_PER_PAGE) + "选择音效")
-                .setItems(choices, (dialog, index) -> library.assign(slot, index == 0 ? null : sounds.get(index - 1)))
+        new AlertDialog.Builder(this).setTitle("为" + SoundLibrary.slotLabel(slot) + "选择音效")
+                .setItems(choices, (dialog, index) -> library.assign(page, slot, index == 0 ? null : sounds.get(index - 1)))
                 .setNegativeButton("取消", null).show();
     }
 

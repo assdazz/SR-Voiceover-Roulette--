@@ -19,18 +19,29 @@ import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityNodeProvider;
 
 import java.util.Arrays;
+import java.util.Objects;
 import java.util.function.IntConsumer;
 
 import static com.srvr.mobile.WheelGeometry.CENTER;
 import static com.srvr.mobile.WheelGeometry.NEXT_PAGE;
 import static com.srvr.mobile.WheelGeometry.NONE;
+import static com.srvr.mobile.WheelGeometry.PREV_PAGE;
+import static com.srvr.mobile.WheelGeometry.STOP_PLAYBACK;
 
 final class WheelView extends View {
+    private static final String PREV_PAGE_LABEL = "上一组";
     private static final String NEXT_PAGE_LABEL = "下一组";
+    private static final String STOP_PLAYBACK_DESC = "取消当前播放";
+    private static final int STOP_FILL = 0xff2b1919;
+    private static final int STOP_ACTIVE_FILL = 0xffff7d7d;
+    private static final int STOP_TEXT = 0xffffa0a0;
+    private static final int STOP_ACTIVE_TEXT = 0xff240c0c;
+
     private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final TextPaint text = new TextPaint(Paint.ANTI_ALIAS_FLAG);
     private final Path slice = new Path();
     private final RectF outer = new RectF();
+    private final RectF middle = new RectF();
     private final RectF inner = new RectF();
     private final RectF hub = new RectF();
     private final int[] screenLocation = new int[2];
@@ -49,10 +60,12 @@ final class WheelView extends View {
     private boolean opensRight = true;
     private int sizePercent = 100;
     private int hubPercent = FloatingSettings.DEFAULT_WHEEL_HUB;
-    private int outerPercent = FloatingSettings.DEFAULT_WHEEL_OUTER;
+    private int controlPercent = FloatingSettings.DEFAULT_WHEEL_CONTROL;
     private float hubRatio = WheelGeometry.HUB_RATIO;
     private float innerRatio = WheelGeometry.INNER_RATIO;
+    private float middleRatio = WheelGeometry.MIDDLE_RATIO;
     private int page;
+    private String pageTitle = "";
     private int pressed = NONE;
     private int flashed = NONE;
     private int selected = NONE;
@@ -77,11 +90,19 @@ final class WheelView extends View {
     }
 
     void setPage(int page, Playable[] sounds) {
-        if (this.page == page && Arrays.equals(this.sounds, sounds)) return;
+        setPage(page, library.pageName(page), sounds);
+    }
+
+    void setPage(int page, String pageTitle, Playable[] sounds) {
+        String safeTitle = pageTitle == null ? "" : pageTitle;
+        if (this.page == page && Objects.equals(this.pageTitle, safeTitle) && Arrays.equals(this.sounds, sounds)) {
+            return;
+        }
         cancelTouch();
         flashed = NONE;
         if (this.page != page) selected = NONE;
         this.page = page;
+        this.pageTitle = safeTitle;
         this.sounds = sounds;
         invalidate();
         sendAccessibilityEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED);
@@ -98,18 +119,19 @@ final class WheelView extends View {
     }
 
     void configure(int sizePercent, boolean opensRight) {
-        configure(sizePercent, FloatingSettings.DEFAULT_WHEEL_HUB, FloatingSettings.DEFAULT_WHEEL_OUTER, opensRight);
+        configure(sizePercent, FloatingSettings.DEFAULT_WHEEL_HUB, FloatingSettings.DEFAULT_WHEEL_CONTROL, opensRight);
     }
 
-    void configure(int sizePercent, int hubPercent, int outerPercent, boolean opensRight) {
+    void configure(int sizePercent, int hubPercent, int controlPercent, boolean opensRight) {
         if (this.sizePercent == sizePercent && this.hubPercent == hubPercent
-                && this.outerPercent == outerPercent && this.opensRight == opensRight) return;
+                && this.controlPercent == controlPercent && this.opensRight == opensRight) return;
         cancelTouch();
         this.sizePercent = sizePercent;
         this.hubPercent = hubPercent;
-        this.outerPercent = outerPercent;
+        this.controlPercent = controlPercent;
         this.hubRatio = WheelGeometry.hubRatio(hubPercent);
-        this.innerRatio = WheelGeometry.innerRatio(hubPercent, outerPercent);
+        this.middleRatio = WheelGeometry.middleRatio(hubPercent, controlPercent);
+        this.innerRatio = WheelGeometry.innerRatio(hubPercent, controlPercent);
         this.opensRight = opensRight;
         updateGeometry(getWidth(), getHeight());
         requestLayout();
@@ -135,6 +157,7 @@ final class WheelView extends View {
         cx = width / 2f + (opensRight ? -shift : shift);
         cy = height / 2f;
         setCircle(outer, radius);
+        setCircle(middle, radius * middleRatio);
         setCircle(inner, radius * innerRatio);
         setCircle(hub, radius * hubRatio);
         invalidate();
@@ -150,35 +173,51 @@ final class WheelView extends View {
         float dp = getResources().getDisplayMetrics().density;
         for (int i = 0; i <= NEXT_PAGE; i++) {
             boolean active = pressed == i || flashed == i || nodes.focused == i;
-            boolean nextPage = i == NEXT_PAGE;
-            boolean outerSlot = i >= WheelGeometry.INNER_SLOTS;
+            int ring = WheelGeometry.ringOf(i);
             float start = WheelGeometry.start(i);
             float sweep = WheelGeometry.sweep(i);
             if (!opensRight) {
                 start = 180 - start;
                 sweep = -sweep;
             }
+            RectF outerArc = ring == 0 ? inner : ring == 1 ? middle : outer;
+            RectF innerArc = ring == 0 ? hub : ring == 1 ? inner : middle;
             slice.reset();
-            slice.arcTo(outerSlot ? outer : inner, start, sweep, true);
-            slice.arcTo(outerSlot ? inner : hub, start + sweep, -sweep, false);
+            slice.arcTo(outerArc, start, sweep, true);
+            slice.arcTo(innerArc, start + sweep, -sweep, false);
             slice.close();
-            Playable sound = soundAt(i);
-            boolean chosen = sound != null && selected == i;
-            int fill = outerSlot ? 0xff17231e : 0xff20312a;
-            if (nextPage) fill = Ui.CONTROL;
-            else if (sound == null) fill = 0xff15201c;
-            else if (chosen) fill = 0xff2aaa65;
-            outlinePath(canvas, active ? Ui.ACCENT : fill, dp);
+
             float x = labelX(i);
             float y = labelY(i);
-            String label = nextPage ? NEXT_PAGE_LABEL : sound == null ? "＋" : sound.title();
-            int labelColor = active || chosen ? Ui.DARK_GREEN
-                    : nextPage ? Ui.ACCENT : sound == null ? Ui.SECONDARY : Ui.TEXT;
-            float ringThickness = outerSlot ? (1f - innerRatio) : (innerRatio - hubRatio);
-            float labelWidth = radius * Math.max(0.22f, Math.min(0.46f,
-                    (nextPage ? 0.34f : outerSlot ? 0.29f : 0.36f) * (ringThickness / (outerSlot ? 0.24f : 0.44f) * 0.45f + 0.55f)));
-            drawSlotLabel(canvas, label, x, y, labelWidth,
-                    Math.min(radius * Math.min(0.115f, ringThickness * 0.48f), textSize(outerSlot ? 11 : 13)), labelColor);
+            if (ring == 2) {
+                float controlBand = 1f - middleRatio;
+                if (i == STOP_PLAYBACK) {
+                    outlinePath(canvas, active ? STOP_ACTIVE_FILL : STOP_FILL, dp);
+                    drawStopLabel(canvas, x, y, controlBand * radius, active ? STOP_ACTIVE_TEXT : STOP_TEXT, dp);
+                } else {
+                    String label = i == PREV_PAGE ? PREV_PAGE_LABEL : NEXT_PAGE_LABEL;
+                    outlinePath(canvas, active ? Ui.ACCENT : Ui.CONTROL, dp);
+                    float size = Math.min(radius * Math.min(0.088f, controlBand * 0.44f), textSize(11));
+                    drawLabel(canvas, label, x, y, radius * 0.34f, size, active ? Ui.DARK_GREEN : Ui.ACCENT);
+                }
+                continue;
+            }
+
+            Playable sound = soundAt(i);
+            boolean chosen = sound != null && selected == i;
+            int fill = ring == 0 ? 0xff20312a : 0xff182621;
+            if (sound == null) fill = ring == 0 ? 0xff15201c : 0xff121c18;
+            else if (chosen) fill = 0xff2aaa65;
+            outlinePath(canvas, active ? Ui.ACCENT : fill, dp);
+
+            String label = sound == null ? "＋" : sound.title();
+            int labelColor = active || chosen ? Ui.DARK_GREEN : sound == null ? Ui.SECONDARY : Ui.TEXT;
+            float ringThickness = ring == 0 ? (innerRatio - hubRatio) : (middleRatio - innerRatio);
+            float baseWidth = ring == 0 ? 0.28f : 0.30f;
+            float labelWidth = radius * Math.max(0.20f, Math.min(0.38f, baseWidth * (ringThickness / 0.25f * 0.35f + 0.65f)));
+            float size = Math.min(radius * Math.min(ring == 0 ? 0.088f : 0.082f, ringThickness * 0.42f),
+                    textSize(ring == 0 ? 12 : 11));
+            drawSlotLabel(canvas, label, x, y, labelWidth, size, labelColor);
         }
 
         float centerRadius = radius * hubRatio;
@@ -188,15 +227,29 @@ final class WheelView extends View {
         outlinePath(canvas, centerActive ? Ui.ACCENT : 0xff17271f, dp);
         int centerText = centerActive ? Ui.DARK_GREEN : Ui.ACCENT;
         paint.setColor(centerText);
-        float mark = Math.min(centerRadius * 0.16f, 6 * dp);
-        float iconY = cy - centerRadius * 0.23f;
+        float mark = Math.min(centerRadius * 0.16f, 5.5f * dp);
+        float iconY = cy - centerRadius * 0.25f;
         canvas.drawRoundRect(cx - mark, iconY - mark, cx + mark, iconY + mark, 2 * dp, 2 * dp, paint);
-        drawLabel(canvas, pageLabel(), cx, cy + centerRadius * 0.28f, centerRadius * 1.8f,
-                Math.min(centerRadius * 0.4f, textSize(13)), centerText);
+        drawLabel(canvas, pageLabel(), cx, cy + centerRadius * 0.27f, centerRadius * 1.72f,
+                Math.min(centerRadius * 0.38f, textSize(12)), centerText);
+    }
+
+    private void drawStopLabel(Canvas canvas, float x, float y, float bandPx, int color, float dp) {
+        float maxByBand = Math.max(7f * dp, (bandPx * 0.80f) / 2f);
+        float size = Math.min(textSize(10.5f), maxByBand);
+        float lineGap = size * 1.18f;
+        float mark = Math.min(size * 0.34f, 4.2f * dp);
+        paint.setColor(color);
+        float iconY = y - lineGap * 1.62f;
+        canvas.drawRoundRect(x - mark, iconY - mark, x + mark, iconY + mark, 1.4f * dp, 1.4f * dp, paint);
+        float width = Math.max(bandPx * 0.90f, size * 2.2f);
+        drawLabel(canvas, "取消", x, y - lineGap * 0.56f, width, size, color);
+        drawLabel(canvas, "当前", x, y + lineGap * 0.56f, width, size, color);
+        drawLabel(canvas, "播放", x, y + lineGap * 1.68f, width, size, color);
     }
 
     private String pageLabel() {
-        return "第" + (page + 1) + "组";
+        return pageTitle.isEmpty() ? "第" + (page + 1) + "组" : pageTitle;
     }
 
     private void outlinePath(Canvas canvas, int fill, float stroke) {
@@ -211,13 +264,16 @@ final class WheelView extends View {
 
     private float labelX(int slot) {
         double angle = Math.toRadians(WheelGeometry.start(slot) + WheelGeometry.sweep(slot) / 2);
-        return cx + (opensRight ? 1 : -1) * radius * WheelGeometry.labelRadius(slot, hubRatio, innerRatio)
+        return cx + (opensRight ? 1 : -1) * radius
+                * WheelGeometry.labelRadius(slot, hubRatio, innerRatio, middleRatio)
                 * (float) Math.cos(angle);
     }
 
     private float labelY(int slot) {
         double angle = Math.toRadians(WheelGeometry.start(slot) + WheelGeometry.sweep(slot) / 2);
-        return cy + radius * WheelGeometry.labelRadius(slot, hubRatio, innerRatio) * (float) Math.sin(angle);
+        return cy + radius
+                * WheelGeometry.labelRadius(slot, hubRatio, innerRatio, middleRatio)
+                * (float) Math.sin(angle);
     }
 
     private void drawSlotLabel(Canvas canvas, String label, float x, float y, float width,
@@ -250,7 +306,7 @@ final class WheelView extends View {
     }
 
     private int hit(float x, float y) {
-        return WheelGeometry.hit(opensRight ? x - cx : cx - x, y - cy, radius, hubRatio, innerRatio);
+        return WheelGeometry.hit(opensRight ? x - cx : cx - x, y - cy, radius, hubRatio, innerRatio, middleRatio);
     }
 
     @Override public boolean onTouchEvent(MotionEvent event) {
@@ -368,9 +424,18 @@ final class WheelView extends View {
     }
 
     private boolean activate(int target, boolean accessibilityClick) {
+        if (target == PREV_PAGE) {
+            library.previousPage();
+            return false;
+        }
         if (target == NEXT_PAGE) {
             library.nextPage();
             return false;
+        }
+        if (target == STOP_PLAYBACK) {
+            SoundPlayer.stop();
+            flash(STOP_PLAYBACK);
+            return true;
         }
         if (target == CENTER) {
             SoundPlayer.stop();
@@ -392,13 +457,18 @@ final class WheelView extends View {
         heldPlayback = null;
     }
 
-    private void select(int target) {
-        setSelectedSlot(target);
+    private void flash(int target) {
         flashed = target;
+        invalidate();
         postDelayed(() -> {
             if (flashed == target) flashed = NONE;
             invalidate();
         }, 160);
+    }
+
+    private void select(int target) {
+        setSelectedSlot(target);
+        flash(target);
         onSoundSelected.accept(target);
     }
 
@@ -450,6 +520,8 @@ final class WheelView extends View {
 
         private String label(int id) {
             if (id == CENTER) return pageLabel() + "，停止播放";
+            if (id == PREV_PAGE) return PREV_PAGE_LABEL;
+            if (id == STOP_PLAYBACK) return STOP_PLAYBACK_DESC;
             if (id == NEXT_PAGE) return NEXT_PAGE_LABEL;
             return SoundLibrary.slotLabel(id) + "，" + (sounds[id] == null ? "空槽位" : sounds[id].title());
         }
@@ -457,8 +529,14 @@ final class WheelView extends View {
         private void setBounds(AccessibilityNodeInfo info, int id) {
             int x = Math.round(id == CENTER ? cx : labelX(id));
             int y = Math.round(id == CENTER ? cy : labelY(id));
-            float width = id == CENTER ? hubRatio
-                    : id < WheelGeometry.INNER_SLOTS ? (innerRatio - hubRatio) * 0.45f : (1f - innerRatio) * 0.5f;
+            float width;
+            if (id == CENTER) width = hubRatio;
+            else {
+                int ring = WheelGeometry.ringOf(id);
+                width = ring == 0 ? (innerRatio - hubRatio) * 0.45f
+                        : ring == 1 ? (middleRatio - innerRatio) * 0.45f
+                        : (1f - middleRatio) * 0.5f;
+            }
             int r = Math.round(radius * width);
             Rect bounds = new Rect(x - r, y - r, x + r, y + r);
             info.setBoundsInParent(bounds);

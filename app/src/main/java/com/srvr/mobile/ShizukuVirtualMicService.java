@@ -3,6 +3,7 @@ package com.srvr.mobile;
 import android.content.AttributionSource;
 import android.content.Context;
 import android.content.ContextWrapper;
+import android.content.pm.PackageManager;
 import android.media.AudioAttributes;
 import android.media.AudioFormat;
 import android.media.AudioManager;
@@ -44,6 +45,26 @@ public final class ShizukuVirtualMicService extends IVirtualMicService.Stub {
             MediaRecorder.AudioSource.VOICE_PERFORMANCE
     };
 
+    private static final int[] CAPTURE_PRESETS_MINIMAL = {
+            MediaRecorder.AudioSource.DEFAULT,
+            MediaRecorder.AudioSource.MIC,
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION
+    };
+
+    private static final int[] CAPTURE_PRESETS_PRE29 = {
+            MediaRecorder.AudioSource.DEFAULT,
+            MediaRecorder.AudioSource.MIC,
+            MediaRecorder.AudioSource.CAMCORDER,
+            MediaRecorder.AudioSource.VOICE_RECOGNITION,
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+            MediaRecorder.AudioSource.UNPROCESSED
+    };
+
+    private static int[] capturePresetsFor(boolean minimal) {
+        if (minimal) return CAPTURE_PRESETS_MINIMAL;
+        return Build.VERSION.SDK_INT >= 29 ? CAPTURE_PRESETS : CAPTURE_PRESETS_PRE29;
+    }
+
     interface BufferLevelListener {
         void onBufferLevel(int availableSamples);
     }
@@ -77,7 +98,9 @@ public final class ShizukuVirtualMicService extends IVirtualMicService.Stub {
     private volatile int cachedChannelMask = -1;
     private volatile boolean cachedExcludeSelf = true;
     private volatile boolean cachedUseSystemUsage = false;
+    private volatile boolean cachedMinimalPresets = false;
     private volatile boolean hasCachedProfile = false;
+    private volatile boolean modifyRoutingGranted = true;
 
     private Context privilegedContext;
     private AudioManager audioManager;
@@ -241,7 +264,9 @@ public final class ShizukuVirtualMicService extends IVirtualMicService.Stub {
     @Override public String getStatus() {
         StringBuilder sb = new StringBuilder();
         sb.append("running=").append(running).append(" mode=").append(modeName(mode)).append('\n');
-        sb.append("uid=").append(Process.myUid());
+        sb.append("uid=").append(Process.myUid())
+                .append(" api=").append(Build.VERSION.SDK_INT)
+                .append(" modifyRouting=").append(modifyRoutingGranted);
         if (privilegedContext != null) {
             sb.append(" pkg=").append(privilegedContext.getOpPackageName());
         }
@@ -505,118 +530,158 @@ public final class ShizukuVirtualMicService extends IVirtualMicService.Stub {
         int mixRoleInjector = getStaticInt(ruleClass, "MIX_ROLE_INJECTOR", 1);
         int routeLoopBack = getStaticInt(mixClass, "ROUTE_FLAG_LOOP_BACK", 0x2);
 
+        boolean hasModifyRouting = checkModifyAudioRouting(ctx);
+        this.modifyRoutingGranted = hasModifyRouting;
+
         int[] channelMaskAttempts = hasCachedProfile
                 ? new int[] { cachedChannelMask, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.CHANNEL_IN_MONO }
                 : new int[] { AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.CHANNEL_IN_MONO };
         boolean[] exclusionAttempts = hasCachedProfile
                 ? new boolean[] { cachedExcludeSelf, !cachedExcludeSelf }
                 : new boolean[] { true, false };
+        boolean[] presetAttempts = hasCachedProfile
+                ? new boolean[] { cachedMinimalPresets, !cachedMinimalPresets }
+                : new boolean[] { false, true };
         List<String> logLines = new ArrayList<>();
         Throwable firstError = null;
+        boolean sawPolicyMinusOne = false;
 
-        for (boolean excludeSelf : exclusionAttempts) {
-            for (int channelMask : channelMaskAttempts) {
-                String maskName = channelMaskName(channelMask);
-                Object candidatePolicy = null;
-                try {
-                    Object ruleBuilder = ruleBuilderClass.getConstructor().newInstance();
-                    Method setTargetMixRole = findMethod(ruleBuilderClass, "setTargetMixRole", int.class);
-                    if (setTargetMixRole != null) {
-                        setTargetMixRole.invoke(ruleBuilder, mixRoleInjector);
-                    }
-                    Method addRule = ruleBuilderClass.getMethod("addRule", AudioAttributes.class, int.class);
-                    for (int preset : CAPTURE_PRESETS) {
-                        AudioAttributes attr = buildCaptureAttributes(preset);
-                        if (attr != null) {
-                            addRule.invoke(ruleBuilder, attr, ruleCapturePreset);
+        for (boolean minimalPresets : presetAttempts) {
+            int[] presets = capturePresetsFor(minimalPresets);
+            String presetTag = minimalPresets ? "min" : "full";
+            for (boolean excludeSelf : exclusionAttempts) {
+                for (int channelMask : channelMaskAttempts) {
+                    String maskName = channelMaskName(channelMask);
+                    Object candidatePolicy = null;
+                    try {
+                        Object ruleBuilder = ruleBuilderClass.getConstructor().newInstance();
+                        Method setTargetMixRole = findMethod(ruleBuilderClass, "setTargetMixRole", int.class);
+                        if (setTargetMixRole != null) {
+                            setTargetMixRole.invoke(ruleBuilder, mixRoleInjector);
                         }
-                    }
-
-                    boolean excludedApplied = false;
-                    if (excludeSelf) {
-                        excludedApplied = applyUidExclusion(ruleBuilderClass, ruleBuilder,
-                                ruleMatchUid, ruleExcludeUid, Process.myUid(), appUid);
-                    }
-
-                    Object rule = ruleBuilderClass.getMethod("build").invoke(ruleBuilder);
-
-                    AudioFormat format = new AudioFormat.Builder()
-                            .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                            .setSampleRate(SAMPLE_RATE)
-                            .setChannelMask(channelMask)
-                            .build();
-                    Constructor<?> mixBuilderCtor = mixBuilderClass.getConstructor(ruleClass);
-                    Object mixBuilder = mixBuilderCtor.newInstance(rule);
-                    mixBuilderClass.getMethod("setFormat", AudioFormat.class).invoke(mixBuilder, format);
-                    mixBuilderClass.getMethod("setRouteFlags", int.class).invoke(mixBuilder, routeLoopBack);
-                    Object mix = mixBuilderClass.getMethod("build").invoke(mixBuilder);
-
-                    Constructor<?> policyBuilderCtor = policyBuilderClass.getConstructor(Context.class);
-                    Object policyBuilder = policyBuilderCtor.newInstance(ctx);
-                    policyBuilderClass.getMethod("addMix", mixClass).invoke(policyBuilder, mix);
-                    Method setLooper = findMethod(policyBuilderClass, "setLooper", Looper.class);
-                    if (setLooper != null) {
-                        setLooper.invoke(policyBuilder, looper);
-                    }
-                    candidatePolicy = policyBuilderClass.getMethod("build").invoke(policyBuilder);
-
-                    int res = registerPolicy(am, policyClass, candidatePolicy);
-                    if (res != 0) {
-                        throw new IllegalStateException("registerAudioPolicy=" + res);
-                    }
-
-                    String regId = getMixRegistration(mixClass, mix);
-                    AudioFormat mixFormat = getMixFormat(mixClass, mix, format);
-
-                    AudioTrack track = null;
-                    String createDetail = "";
-                    TrackResult manual = createManualInjectionTrack(ctx, mixFormat, regId,
-                            hasCachedProfile ? cachedUseSystemUsage : false);
-                    if (manual.track != null) {
-                        track = manual.track;
-                        createDetail = "manual(" + manual.note + ")";
-                        cachedUseSystemUsage = manual.usedSystemUsage;
-                    } else {
-                        try {
-                            Method createTrack = policyClass.getMethod("createAudioTrackSource", mixClass);
-                            AudioTrack t = (AudioTrack) createTrack.invoke(candidatePolicy, mix);
-                            if (t != null && t.getState() == AudioTrack.STATE_INITIALIZED) {
-                                track = t;
-                                createDetail = "api";
-                            } else {
-                                if (t != null) t.release();
-                                throw new IllegalStateException("manual(" + manual.note + "); api=invalid; reg=" + regId);
+                        Method addRule = ruleBuilderClass.getMethod("addRule", AudioAttributes.class, int.class);
+                        for (int preset : presets) {
+                            AudioAttributes attr = buildCaptureAttributes(preset);
+                            if (attr != null) {
+                                addRule.invoke(ruleBuilder, attr, ruleCapturePreset);
                             }
-                        } catch (Throwable apiErr) {
-                            throw new IllegalStateException(
-                                    "manual(" + manual.note + "); api:" + describeError(apiErr) + "; reg=" + regId);
                         }
-                    }
 
-                    cachedChannelMask = channelMask;
-                    cachedExcludeSelf = excludeSelf;
-                    hasCachedProfile = true;
+                        boolean excludedApplied = false;
+                        if (excludeSelf) {
+                            excludedApplied = applyUidExclusion(ruleBuilderClass, ruleBuilder,
+                                    ruleMatchUid, ruleExcludeUid, Process.myUid(), appUid);
+                        }
 
-                    String chLabel = track.getChannelCount() == 2 ? "STEREO" : "MONO";
-                    String note = "AudioPolicy 已注册 · 48kHz/" + chLabel
-                            + (excludedApplied ? " · 已排除自环" : "");
-                    logLines.add("OK[" + (excludeSelf ? "excl" : "all") + "," + maskName + "]: " + createDetail);
-                    this.attemptLog = String.join("\n", logLines);
-                    return new PolicySetup(candidatePolicy, track, excludedApplied, note);
-                } catch (Throwable t) {
-                    if (candidatePolicy != null) {
-                        unregisterPolicyQuietly(am, candidatePolicy);
+                        Object rule = ruleBuilderClass.getMethod("build").invoke(ruleBuilder);
+
+                        AudioFormat format = new AudioFormat.Builder()
+                                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                                .setSampleRate(SAMPLE_RATE)
+                                .setChannelMask(channelMask)
+                                .build();
+                        Constructor<?> mixBuilderCtor = mixBuilderClass.getConstructor(ruleClass);
+                        Object mixBuilder = mixBuilderCtor.newInstance(rule);
+                        mixBuilderClass.getMethod("setFormat", AudioFormat.class).invoke(mixBuilder, format);
+                        mixBuilderClass.getMethod("setRouteFlags", int.class).invoke(mixBuilder, routeLoopBack);
+                        Object mix = mixBuilderClass.getMethod("build").invoke(mixBuilder);
+
+                        Constructor<?> policyBuilderCtor = policyBuilderClass.getConstructor(Context.class);
+                        Object policyBuilder = policyBuilderCtor.newInstance(ctx);
+                        policyBuilderClass.getMethod("addMix", mixClass).invoke(policyBuilder, mix);
+                        Method setLooper = findMethod(policyBuilderClass, "setLooper", Looper.class);
+                        if (setLooper != null) {
+                            setLooper.invoke(policyBuilder, looper);
+                        }
+                        candidatePolicy = policyBuilderClass.getMethod("build").invoke(policyBuilder);
+
+                        int res = registerPolicy(am, policyClass, candidatePolicy);
+                        if (res != 0) {
+                            if (res == -1) sawPolicyMinusOne = true;
+                            throw new IllegalStateException("registerAudioPolicy=" + res);
+                        }
+
+                        String regId = getMixRegistration(mixClass, mix);
+                        AudioFormat mixFormat = getMixFormat(mixClass, mix, format);
+
+                        AudioTrack track = null;
+                        String createDetail = "";
+                        TrackResult manual = createManualInjectionTrack(ctx, mixFormat, regId,
+                                hasCachedProfile ? cachedUseSystemUsage : false);
+                        if (manual.track != null) {
+                            track = manual.track;
+                            createDetail = "manual(" + manual.note + ")";
+                            cachedUseSystemUsage = manual.usedSystemUsage;
+                        } else {
+                            try {
+                                Method createTrack = policyClass.getMethod("createAudioTrackSource", mixClass);
+                                AudioTrack t = (AudioTrack) createTrack.invoke(candidatePolicy, mix);
+                                if (t != null && t.getState() == AudioTrack.STATE_INITIALIZED) {
+                                    track = t;
+                                    createDetail = "api";
+                                } else {
+                                    if (t != null) t.release();
+                                    throw new IllegalStateException("manual(" + manual.note + "); api=invalid; reg=" + regId);
+                                }
+                            } catch (Throwable apiErr) {
+                                throw new IllegalStateException(
+                                        "manual(" + manual.note + "); api:" + describeError(apiErr) + "; reg=" + regId);
+                            }
+                        }
+
+                        cachedChannelMask = channelMask;
+                        cachedExcludeSelf = excludeSelf;
+                        cachedMinimalPresets = minimalPresets;
+                        hasCachedProfile = true;
+
+                        String chLabel = track.getChannelCount() == 2 ? "STEREO" : "MONO";
+                        String note = "AudioPolicy 已注册 · 48kHz/" + chLabel
+                                + (excludedApplied ? " · 已排除自环" : "")
+                                + (minimalPresets ? " · 兼容模式" : "");
+                        logLines.add("OK[" + presetTag + "," + (excludeSelf ? "excl" : "all") + "," + maskName + "]: " + createDetail);
+                        this.attemptLog = String.join("\n", logLines);
+                        return new PolicySetup(candidatePolicy, track, excludedApplied, note);
+                    } catch (Throwable t) {
+                        if (candidatePolicy != null) {
+                            unregisterPolicyQuietly(am, candidatePolicy);
+                        }
+                        String err = describeError(t);
+                        logLines.add("FAIL[" + presetTag + "," + (excludeSelf ? "excl" : "all") + "," + maskName + "]: " + err);
+                        if (firstError == null) firstError = t;
+                        Log.w(TAG, "Policy attempt failed (" + presetTag + ", " + excludeSelf + ", " + maskName + "): " + err);
                     }
-                    String err = describeError(t);
-                    logLines.add("FAIL[" + (excludeSelf ? "excl" : "all") + "," + maskName + "]: " + err);
-                    if (firstError == null) firstError = t;
-                    Log.w(TAG, "Policy attempt failed (" + excludeSelf + ", " + maskName + "): " + err);
                 }
             }
+            if (!hasModifyRouting && sawPolicyMinusOne) break;
         }
         this.attemptLog = String.join("\n", logLines);
+        if (sawPolicyMinusOne) {
+            throw new IllegalStateException(diagnosePolicyRejected(hasModifyRouting));
+        }
         if (firstError instanceof Exception ex) throw ex;
         throw new IllegalStateException(firstError != null ? describeError(firstError) : "AudioPolicy 注册失败", firstError);
+    }
+
+    private static boolean checkModifyAudioRouting(Context ctx) {
+        if (Process.myUid() == 0) return true;
+        try {
+            return ctx.checkPermission("android.permission.MODIFY_AUDIO_ROUTING",
+                    Process.myPid(), Process.myUid()) == PackageManager.PERMISSION_GRANTED;
+        } catch (Throwable t) {
+            Log.w(TAG, "checkPermission(MODIFY_AUDIO_ROUTING) failed: " + t.getMessage());
+            return true;
+        }
+    }
+
+    private static String diagnosePolicyRejected(boolean hasModifyRouting) {
+        int uid = Process.myUid();
+        String env = "Android " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + ", UID=" + uid + ")";
+        if (!hasModifyRouting) {
+            return "系统拒绝注册虚拟麦（registerAudioPolicy=-1）：当前 Shizuku 未具备 MODIFY_AUDIO_ROUTING 权限 · " + env
+                    + "。\n常见于 Android 11 及以下或部分定制系统（如鸿蒙/旧版系统）；需 Android 12+ 且系统开放该权限，或使用 Root 模式启动 Shizuku。";
+        }
+        return "系统拒绝注册虚拟麦（registerAudioPolicy=-1，路由权限已具备）· " + env
+                + "。\n请先关闭系统录屏、投屏、游戏变声器、AI 字幕或其他虚拟麦软件，再重启一次 Shizuku 服务后重试；若仍失败，说明当前系统 ROM 限制或裁剪了 REMOTE_SUBMIX 音频策略。";
     }
 
     private static final class TrackResult {

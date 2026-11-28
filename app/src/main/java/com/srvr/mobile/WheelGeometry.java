@@ -2,66 +2,86 @@ package com.srvr.mobile;
 
 final class WheelGeometry {
     static final int INNER_SLOTS = 4;
-    static final int OUTER_SLOTS = 3;
-    static final int SLOT_COUNT = INNER_SLOTS + OUTER_SLOTS;
-    static final int NEXT_PAGE = SLOT_COUNT;
+    static final int MIDDLE_SLOTS = 4;
+    static final int SLOT_COUNT = INNER_SLOTS + MIDDLE_SLOTS;
+    static final int PREV_PAGE = SLOT_COUNT;
+    static final int STOP_PLAYBACK = PREV_PAGE + 1;
+    static final int NEXT_PAGE = STOP_PLAYBACK + 1;
     static final int CENTER = NEXT_PAGE + 1;
     static final int NONE = -2;
-    static final int RADIUS_DP = 146;
+    static final int RADIUS_DP = 166;
     static final int PADDING_DP = 4;
-    static final float HUB_RATIO = 0.30f;
-    static final float INNER_RATIO = 0.70f;
-    static final float OUTER_RATIO = 1f - INNER_RATIO;
-    private static final float MIN_INNER_BAND = 0.14f;
+    static final float HUB_RATIO = 0.26f;
+    static final float CONTROL_RATIO = 0.20f;
+    static final float MIDDLE_RATIO = 1f - CONTROL_RATIO;
+    static final float INNER_RATIO = HUB_RATIO + (MIDDLE_RATIO - HUB_RATIO) * 0.5f;
+    private static final float MIN_SOUND_BAND = 0.13f;
     private static final float START = -90f;
-    private static final float INNER_STEP = 180f / INNER_SLOTS;
-    private static final float OUTER_STEP = 180f / (OUTER_SLOTS + 1);
+    private static final float SECTOR_STEP = 180f / INNER_SLOTS;
 
     record Panel(int left, int top, int width, int height) {}
 
     private WheelGeometry() {}
 
     static float hubRatio(int hubPercent) {
-        return Math.max(0.15f, Math.min(0.55f, hubPercent / 100f));
+        return Math.max(0.15f, Math.min(0.45f, hubPercent / 100f));
     }
 
-    static float innerRatio(int hubPercent, int outerPercent) {
+    static float middleRatio(int hubPercent, int controlPercent) {
         float hub = hubRatio(hubPercent);
-        float maxOuter = Math.max(0.12f, 1f - hub - MIN_INNER_BAND);
-        float outer = Math.max(0.12f, Math.min(maxOuter, outerPercent / 100f));
-        return 1f - outer;
+        float maxControl = Math.max(0.12f, 1f - hub - 2f * MIN_SOUND_BAND);
+        float control = Math.max(0.12f, Math.min(maxControl, controlPercent / 100f));
+        return 1f - control;
+    }
+
+    static float innerRatio(int hubPercent, int controlPercent) {
+        float hub = hubRatio(hubPercent);
+        float middle = middleRatio(hubPercent, controlPercent);
+        return hub + (middle - hub) * 0.5f;
+    }
+
+    static int ringOf(int slot) {
+        if (slot < INNER_SLOTS) return 0;
+        if (slot < SLOT_COUNT) return 1;
+        return 2;
     }
 
     static float sweep(int slot) {
-        return slot < INNER_SLOTS ? INNER_STEP : OUTER_STEP;
+        return slot == STOP_PLAYBACK ? SECTOR_STEP * 2f : SECTOR_STEP;
     }
 
     static float start(int slot) {
-        return START + sweep(slot) * (slot < INNER_SLOTS ? slot : slot - INNER_SLOTS);
+        if (slot < INNER_SLOTS) return START + SECTOR_STEP * slot;
+        if (slot < SLOT_COUNT) return START + SECTOR_STEP * (slot - INNER_SLOTS);
+        if (slot == PREV_PAGE) return START;
+        if (slot == STOP_PLAYBACK) return START + SECTOR_STEP;
+        return START + SECTOR_STEP * 3f;
     }
 
-    static float labelRadius(int slot) {
-        return labelRadius(slot, HUB_RATIO, INNER_RATIO);
+    static float labelRadius(int slot, float hubRatio, float innerRatio, float middleRatio) {
+        return switch (ringOf(slot)) {
+            case 0 -> (hubRatio + innerRatio) / 2f;
+            case 1 -> (innerRatio + middleRatio) / 2f;
+            default -> (middleRatio + 1f) / 2f;
+        };
     }
 
-    static float labelRadius(int slot, float hubRatio, float innerRatio) {
-        return slot < INNER_SLOTS ? (hubRatio + innerRatio) / 2f : (innerRatio + 1f) / 2f;
-    }
-
-    static int hit(float inwardX, float y, float radius) {
-        return hit(inwardX, y, radius, HUB_RATIO, INNER_RATIO);
-    }
-
-    static int hit(float inwardX, float y, float radius, float hubRatio, float innerRatio) {
+    static int hit(float inwardX, float y, float radius, float hubRatio, float innerRatio, float middleRatio) {
         if (radius <= 0) return NONE;
         double distance = Math.hypot(inwardX, y);
         if (distance < radius * hubRatio) return CENTER;
         if (inwardX < 0 || distance > radius) return NONE;
         double angle = Math.toDegrees(Math.atan2(y, inwardX)) - START;
+        if (angle < 0) angle = 0;
         if (distance <= radius * innerRatio) {
-            return Math.min(INNER_SLOTS - 1, (int) (angle / INNER_STEP));
+            return Math.min(INNER_SLOTS - 1, (int) (angle / SECTOR_STEP));
         }
-        return INNER_SLOTS + Math.min(OUTER_SLOTS, (int) (angle / OUTER_STEP));
+        if (distance <= radius * middleRatio) {
+            return INNER_SLOTS + Math.min(MIDDLE_SLOTS - 1, (int) (angle / SECTOR_STEP));
+        }
+        if (angle < SECTOR_STEP) return PREV_PAGE;
+        if (angle < SECTOR_STEP * 3f) return STOP_PLAYBACK;
+        return NEXT_PAGE;
     }
 
     static float fitRadius(int width, int height, int padding, float preferredRadius) {

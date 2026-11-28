@@ -90,7 +90,7 @@ public final class SoundSetActivity extends Activity {
         scroll.addView(body, new ScrollView.LayoutParams(Ui.MATCH, Ui.WRAP));
 
         LinearLayout playback = Ui.card(this);
-        Ui.below(playback, Ui.text(this, "播放方式", 13, Ui.SECONDARY, true), 0);
+        Ui.below(playback, labelRow("播放方式", 1f, "每次播放的数量", 1.25f), 0);
         LinearLayout choices = Ui.row(this);
         choices.setBaselineAligned(false);
         mode = Ui.menuButton(this, "");
@@ -106,14 +106,17 @@ public final class SoundSetActivity extends Activity {
         Ui.below(playback, choices, 5);
         Ui.below(body, playback, 0);
         LinearLayout triggering = Ui.card(this);
-        Ui.below(triggering, Ui.text(this, "触发方式", 13, Ui.SECONDARY, true), 0);
+        Ui.below(triggering, labelRow("触发方式", 1f, "同一播放集再次触发时", 1.25f), 0);
         LinearLayout triggerChoices = Ui.row(this);
+        triggerChoices.setBaselineAligned(false);
         trigger = Ui.menuButton(this, "");
         trigger.setOnClickListener(view -> chooseTrigger());
-        Ui.weighted(triggerChoices, trigger, 0);
+        triggerChoices.addView(trigger, new LinearLayout.LayoutParams(0, Ui.MATCH, 1));
         interrupt = Ui.menuButton(this, "");
         interrupt.setOnClickListener(view -> chooseInterrupt());
-        Ui.weighted(triggerChoices, interrupt, 6);
+        LinearLayout.LayoutParams interruptLayout = new LinearLayout.LayoutParams(0, Ui.MATCH, 1.25f);
+        interruptLayout.setMarginStart(dp(6));
+        triggerChoices.addView(interrupt, interruptLayout);
         Ui.below(triggering, triggerChoices, 5);
         Ui.below(body, triggering, 8);
 
@@ -144,6 +147,19 @@ public final class SoundSetActivity extends Activity {
         Button remove = Ui.button(this, "删除播放集", false);
         remove.setOnClickListener(view -> confirmRemove());
         Ui.below(body, remove, 12);
+    }
+
+    private LinearLayout labelRow(String leftLabel, float leftWeight, String rightLabel, float rightWeight) {
+        LinearLayout labels = Ui.row(this);
+        labels.setGravity(Gravity.BOTTOM);
+        labels.setBaselineAligned(false);
+        TextView left = Ui.text(this, leftLabel, 13, Ui.SECONDARY, true);
+        labels.addView(left, new LinearLayout.LayoutParams(0, Ui.WRAP, leftWeight));
+        TextView right = Ui.text(this, rightLabel, 13, Ui.SECONDARY, true);
+        LinearLayout.LayoutParams rightLp = new LinearLayout.LayoutParams(0, Ui.WRAP, rightWeight);
+        rightLp.setMarginStart(dp(6));
+        labels.addView(right, rightLp);
+        return labels;
     }
 
     private void refresh() {
